@@ -14,16 +14,16 @@ from pydoe import lhs
 # Setup
 # ---------------------------------------------------------------------
 
-torch.set_default_dtype(torch.float64)
+torch.set_default_dtype(torch.float32)
 torch.manual_seed(1234)
 np.random.seed(1234)
 
-C0 = 299_792_458.0
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 print(f"device: {device}")
 if device.type == "cuda":
     print(f"GPU: {torch.cuda.get_device_name()}")
+
+C0 = 299_792_458.0
 
 
 # ---------------------------------------------------------------------
@@ -31,7 +31,7 @@ if device.type == "cuda":
 # ---------------------------------------------------------------------
 
 @dataclass
-class ForwardPINNConfig:
+class PINNConfig:
     # Physics
     f0: float = 150e9
     eps_r1: float = 1.0
@@ -48,7 +48,7 @@ class ForwardPINNConfig:
     epochs: int = 5000
     lr: float = 1e-3
     #init_rt_from_analytic: bool = False
-    n_f_coating: int = 400
+    n_collocation_coating: int = 400
 
     # Loss weights
     w_pde: float = 1.0
@@ -79,7 +79,7 @@ def sample_uniform(low: float, high: float, n: int, device: torch.device) -> tor
 
 
 def to_torch_complex(x: complex | float, device: torch.device) -> torch.Tensor:
-    return torch.tensor(x, dtype=torch.complex128, device=device)
+    return torch.tensor(x, dtype=torch.complex64, device=device)
 
 
 def plot_curve(x, y, *, label, xlabel, ylabel, title, style="-", vlines=None):
@@ -136,9 +136,9 @@ def solve_single_layer_analytic(f: float, n1: float, n2: float, n3: float, d: fl
             [e_m, e_p, 0.0, -1.0],
             [k2 * e_m, -k2 * e_p, 0.0, -k3],
         ],
-        dtype=np.complex128,
+        dtype=np.complex64,
     )
-    b = np.array([1.0, k1, 0.0, 0.0], dtype=np.complex128)
+    b = np.array([1.0, k1, 0.0, 0.0], dtype=np.complex64)
     A, B, r, t = np.linalg.solve(M, b)
 
     R = abs(r) ** 2
@@ -161,7 +161,7 @@ def analytic_field(
     A, B, r, t = amps["A"], amps["B"], amps["r"], amps["t"]
 
     x = np.asarray(x)
-    E = np.zeros_like(x, dtype=np.complex128)
+    E = np.zeros_like(x, dtype=np.complex64)
 
     left = x < 0.0
     coat = (x >= 0.0) & (x <= d)
@@ -190,7 +190,7 @@ class FCNComplex(nn.Module):
             nn.init.zeros_(layer.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Keep input dtype consistent with layer weights (float32/float64).
+        # Keep input dtype consistent with layer weights (float32/float32).
         y = x.to(dtype=self.linears[0].weight.dtype)
         for layer in self.linears[:-1]:
             y = self.activation(layer(y))
@@ -260,7 +260,7 @@ def coating_pde_loss(model: FCNComplex, x_phys: torch.Tensor, n2: float, l_ref: 
 def compute_losses(
     model: FCNComplex,
     scat: ScatteringCoeffs,
-    cfg: ForwardPINNConfig,
+    cfg: PINNConfig,
     collocation: torch.Tensor,
     phys: dict[str, float],
 ) -> dict[str, torch.Tensor]:
@@ -273,8 +273,8 @@ def compute_losses(
 
     l_pde = coating_pde_loss(model, collocation, n2, l_ref)
 
-    x0 = torch.tensor([[0.0]], dtype=torch.float64, device=device)
-    xd = torch.tensor([[d]], dtype=torch.float64, device=device)
+    x0 = torch.tensor([[0.0]], dtype=torch.float32, device=device)
+    xd = torch.tensor([[d]], dtype=torch.float32, device=device)
 
     e2_0, de2_0_hat, _ = field_and_derivatives(model, x0 / l_ref, create_graph=True)
     e2_d, de2_d_hat, _ = field_and_derivatives(model, xd / l_ref, create_graph=True)
@@ -315,7 +315,7 @@ def compute_losses(
 def evaluate_piecewise_field(
     model: FCNComplex,
     scat: ScatteringCoeffs,
-    cfg: ForwardPINNConfig,
+    cfg: PINNConfig,
     x_grid: torch.Tensor,
     phys: dict[str, float],
 ) -> torch.Tensor:
@@ -326,7 +326,7 @@ def evaluate_piecewise_field(
     ei = to_torch_complex(cfg.Ei, x_grid.device)
 
     x = x_grid
-    out = torch.zeros((x.shape[0], 1), dtype=torch.complex128, device=x.device)
+    out = torch.zeros((x.shape[0], 1), dtype=torch.complex64, device=x.device)
 
     left = x[:, 0] < 0.0
     coat = (x[:, 0] >= 0.0) & (x[:, 0] <= d)
@@ -351,7 +351,7 @@ def evaluate_piecewise_field(
 # Main solver
 # ---------------------------------------------------------------------
 
-def run_forward_pinn(cfg: ForwardPINNConfig) -> dict[str, Any]:
+def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     n1 = np.sqrt(cfg.eps_r1 * cfg.mu_r)
     n3 = np.sqrt(cfg.eps_r3 * cfg.mu_r)
     n2, d = compute_optimal_layer(cfg.f0, cfg.eps_r1, cfg.eps_r3, cfg.mu_r)
@@ -380,9 +380,9 @@ def run_forward_pinn(cfg: ForwardPINNConfig) -> dict[str, Any]:
         "x_right": float(x_right),
     }
 
-    #x_f = sample_uniform(0.0, d, cfg.n_f_coating, device)
-    x_f = lhs(1, cfg.n_f_coating) * d
-    x_f = torch.tensor(x_f, dtype=torch.float64, device=device)
+    #x_f = sample_uniform(0.0, d, cfg.n_collocation_coating, device)
+    x_f = lhs(1, cfg.n_collocation_coating) * d
+    x_f = torch.tensor(x_f, dtype=torch.float32, device=device)
 
     model = FCNComplex(cfg.layers).to(device)
     scat = ScatteringCoeffs().to(device)
@@ -408,8 +408,8 @@ def run_forward_pinn(cfg: ForwardPINNConfig) -> dict[str, Any]:
 
     for ep in range(1, cfg.epochs + 1):
         if ep % 10 ==0:
-            x_f = lhs(1, cfg.n_f_coating) * d
-            x_f = torch.tensor(x_f, dtype=torch.float64, device=device)
+            x_f = lhs(1, cfg.n_collocation_coating) * d
+            x_f = torch.tensor(x_f, dtype=torch.float32, device=device)
             
         losses = compute_losses(model, scat, cfg, x_f, phys)
 
@@ -452,8 +452,8 @@ def run_forward_pinn(cfg: ForwardPINNConfig) -> dict[str, Any]:
 
     # Interface diagnostic
     with torch.enable_grad():
-        x0 = torch.tensor([[0.0]], dtype=torch.float64, device=device)
-        xd = torch.tensor([[d]], dtype=torch.float64, device=device)
+        x0 = torch.tensor([[0.0]], dtype=torch.float32, device=device)
+        xd = torch.tensor([[d]], dtype=torch.float32, device=device)
 
         e2_0, de2_0_hat, _ = field_and_derivatives(model, x0 / l_ref, create_graph=True)
         e2_d, de2_d_hat, _ = field_and_derivatives(model, xd / l_ref, create_graph=True)
@@ -576,7 +576,7 @@ def run_forward_pinn(cfg: ForwardPINNConfig) -> dict[str, Any]:
 
 
 def main(config: dict[str, Any] | None = None) -> dict[str, Any]:
-    cfg = ForwardPINNConfig()
+    cfg = PINNConfig()
     if config:
         cfg = replace(cfg, **config)
     return run_forward_pinn(cfg)
