@@ -14,7 +14,7 @@ from pydoe import lhs
 # Setup
 # ---------------------------------------------------------------------
 
-torch.set_default_dtype(torch.float32)
+torch.set_default_dtype(torch.float64)
 torch.manual_seed(1234)
 np.random.seed(1234)
 
@@ -79,7 +79,7 @@ def sample_uniform(low: float, high: float, n: int, device: torch.device) -> tor
 
 
 def to_torch_complex(x: complex | float, device: torch.device) -> torch.Tensor:
-    return torch.tensor(x, dtype=torch.complex64, device=device)
+    return torch.tensor(x, dtype=torch.complex128, device=device)
 
 
 def plot_curve(x, y, *, label, xlabel, ylabel, title, style="-", vlines=None):
@@ -190,7 +190,8 @@ class FCNComplex(nn.Module):
             nn.init.zeros_(layer.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y = x.float()
+        # Keep input dtype consistent with layer weights (float32/float64).
+        y = x.to(dtype=self.linears[0].weight.dtype)
         for layer in self.linears[:-1]:
             y = self.activation(layer(y))
         return self.linears[-1](y)
@@ -272,8 +273,8 @@ def compute_losses(
 
     l_pde = coating_pde_loss(model, collocation, n2, l_ref)
 
-    x0 = torch.tensor([[0.0]], dtype=torch.float32, device=device)
-    xd = torch.tensor([[d]], dtype=torch.float32, device=device)
+    x0 = torch.tensor([[0.0]], dtype=torch.float64, device=device)
+    xd = torch.tensor([[d]], dtype=torch.float64, device=device)
 
     e2_0, de2_0_hat, _ = field_and_derivatives(model, x0 / l_ref, create_graph=True)
     e2_d, de2_d_hat, _ = field_and_derivatives(model, xd / l_ref, create_graph=True)
@@ -325,7 +326,7 @@ def evaluate_piecewise_field(
     ei = to_torch_complex(cfg.Ei, x_grid.device)
 
     x = x_grid
-    out = torch.zeros((x.shape[0], 1), dtype=torch.complex64, device=x.device)
+    out = torch.zeros((x.shape[0], 1), dtype=torch.complex128, device=x.device)
 
     left = x[:, 0] < 0.0
     coat = (x[:, 0] >= 0.0) & (x[:, 0] <= d)
@@ -381,7 +382,7 @@ def run_forward_pinn(cfg: ForwardPINNConfig) -> dict[str, Any]:
 
     #x_f = sample_uniform(0.0, d, cfg.n_f_coating, device)
     x_f = lhs(1, cfg.n_f_coating) * d
-    x_f = torch.tensor(x_f, dtype=torch.float32, device=device)
+    x_f = torch.tensor(x_f, dtype=torch.float64, device=device)
 
     model = FCNComplex(cfg.layers).to(device)
     scat = ScatteringCoeffs().to(device)
@@ -406,9 +407,9 @@ def run_forward_pinn(cfg: ForwardPINNConfig) -> dict[str, Any]:
     scat.train()
 
     for ep in range(1, cfg.epochs + 1):
-        if ep % 500 ==0:
+        if ep % 10 ==0:
             x_f = lhs(1, cfg.n_f_coating) * d
-            x_f = torch.tensor(x_f, dtype=torch.float32, device=device)
+            x_f = torch.tensor(x_f, dtype=torch.float64, device=device)
             
         losses = compute_losses(model, scat, cfg, x_f, phys)
 
@@ -451,8 +452,8 @@ def run_forward_pinn(cfg: ForwardPINNConfig) -> dict[str, Any]:
 
     # Interface diagnostic
     with torch.enable_grad():
-        x0 = torch.tensor([[0.0]], dtype=torch.float32, device=device)
-        xd = torch.tensor([[d]], dtype=torch.float32, device=device)
+        x0 = torch.tensor([[0.0]], dtype=torch.float64, device=device)
+        xd = torch.tensor([[d]], dtype=torch.float64, device=device)
 
         e2_0, de2_0_hat, _ = field_and_derivatives(model, x0 / l_ref, create_graph=True)
         e2_d, de2_d_hat, _ = field_and_derivatives(model, xd / l_ref, create_graph=True)
