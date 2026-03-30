@@ -74,14 +74,6 @@ def complex_mse(z: torch.Tensor) -> torch.Tensor:
     return complex_abs2(z).mean()
 
 
-def sample_uniform(low: float, high: float, n: int, device: torch.device) -> torch.Tensor:
-    return low + (high - low) * torch.rand(n, 1, device=device)
-
-
-def to_torch_complex(x: complex | float, device: torch.device) -> torch.Tensor:
-    return torch.tensor(x, dtype=torch.complex64, device=device)
-
-
 def plot_curve(x, y, *, label, xlabel, ylabel, title, style="-", vlines=None):
     plt.plot(x, y, style, label=label)
     if vlines:
@@ -96,7 +88,7 @@ def plot_curve(x, y, *, label, xlabel, ylabel, title, style="-", vlines=None):
 
 
 # ---------------------------------------------------------------------
-# Physics / analytic reference
+# Analytic reference
 # ---------------------------------------------------------------------
 
 def compute_optimal_layer(
@@ -105,45 +97,42 @@ def compute_optimal_layer(
     eps_r3: float = 11.7,
     mu_r: float = 1.0,
 ) -> tuple[float, float]:
-    """
-    Optimal single-layer AR coating at normal incidence:
-        n2 = sqrt(n1 * n3)
-        d  = lambda_2 / 4 = c0 / (4 f0 n2)
-    """
-    n1 = np.sqrt(eps_r1 * mu_r)
-    n3 = np.sqrt(eps_r3 * mu_r)
-    n2 = np.sqrt(n1 * n3)
-    d = C0 / (4.0 * f0 * n2)
+    eps_r2 = np.sqrt(eps_r1 * eps_r3)
+    d = C0 / (4.0 * f0 * np.sqrt(eps_r2 * mu_r))
+    n2 = np.sqrt(eps_r2 * mu_r)
     return float(n2), float(d)
 
 
-def solve_single_layer_analytic(f: float, n1: float, n2: float, n3: float, d: float) -> dict[str, complex]:
-    """
-    region 1: E1 = exp(-j k1 x) + r exp(+j k1 x)
-    region 2: E2 = A exp(-j k2 x) + B exp(+j k2 x)
-    region 3: E3 = t exp(-j k3 (x-d))
-    """
+def solve_single_layer_analytic(
+    f: float,
+    n1: float,
+    n2: float,
+    n3: float,
+    d: float,
+    Ei: complex = 1.0,
+) -> dict[str, complex]:
     k0 = 2.0 * np.pi * f / C0
     k1, k2, k3 = k0 * n1, k0 * n2, k0 * n3
 
-    e_m = np.exp(-1j * k2 * d)
-    e_p = np.exp(1j * k2 * d)
+    e2m = np.exp(-1j * k2 * d)
+    e2p = np.exp(1j * k2 * d)
+    e3m = np.exp(-1j * k3 * d)
 
-    M = np.array(
-        [
-            [1.0, 1.0, -1.0, 0.0],
-            [k2, -k2, k1, 0.0],
-            [e_m, e_p, 0.0, -1.0],
-            [k2 * e_m, -k2 * e_p, 0.0, -k3],
-        ],
-        dtype=np.complex64,
-    )
-    b = np.array([1.0, k1, 0.0, 0.0], dtype=np.complex64)
-    A, B, r, t = np.linalg.solve(M, b)
+    M = np.array([[-1.0,      1.0,        1.0,        0.0],
+                  [ k1,       k2,        -k2,         0.0],
+                  [ 0.0,      e2m,        e2p,       -e3m],
+                  [ 0.0,   k2 * e2m,  -k2 * e2p,  -k3 * e3m]], dtype=np.complex128)
 
-    R = abs(r) ** 2
-    T = (n3 / n1) * abs(t) ** 2
-    return {"A": A, "B": B, "r": r, "t": t, "R": R, "T": T}
+    b = np.array([Ei, k1 * Ei, 0.0, 0.0], dtype=np.complex128)
+
+    Er, A, B, Et = np.linalg.solve(M, b)
+
+    r = Er / Ei
+    t = Et / Ei
+    R = np.abs(r) ** 2
+    T = (n3 / n1) * np.abs(t) ** 2
+
+    return {"Er": Er, "A": A, "B": B, "Et": Et, "r": r, "t": t, "R": R, "T": T}
 
 
 def analytic_field(
@@ -153,23 +142,28 @@ def analytic_field(
     n2: float,
     n3: float,
     d: float,
-    Ei: float,
+    Ei: complex,
     amps: dict[str, complex],
 ) -> np.ndarray:
+
     k0 = 2.0 * np.pi * f / C0
     k1, k2, k3 = k0 * n1, k0 * n2, k0 * n3
-    A, B, r, t = amps["A"], amps["B"], amps["r"], amps["t"]
 
-    x = np.asarray(x)
-    E = np.zeros_like(x, dtype=np.complex64)
+    Er = amps["Er"]
+    A = amps["A"]
+    B = amps["B"]
+    Et = amps["Et"]
 
-    left = x < 0.0
-    coat = (x >= 0.0) & (x <= d)
-    right = x > d
+    E = np.zeros_like(x, dtype=np.complex128)
 
-    E[left] = Ei * (np.exp(-1j * k1 * x[left]) + r * np.exp(1j * k1 * x[left]))
-    E[coat] = Ei * (A * np.exp(-1j * k2 * x[coat]) + B * np.exp(1j * k2 * x[coat]))
-    E[right] = Ei * t * np.exp(-1j * k3 * (x[right] - d))
+    m1 = x < 0.0
+    m2 = (x >= 0.0) & (x <= d)
+    m3 = x > d
+
+    E[m1] = Ei * np.exp(-1j * k1 * x[m1]) + Er * np.exp(1j * k1 * x[m1])
+    E[m2] = A * np.exp(-1j * k2 * x[m2]) + B * np.exp(1j * k2 * x[m2])
+    E[m3] = Et * np.exp(-1j * k3 * x[m3])
+
     return E
 
 
@@ -268,8 +262,11 @@ def compute_losses(
     n1, n3 = phys["n1"], phys["n3"]
     n2, d, l_ref = phys["n2"], phys["d"], phys["l_ref"]
 
-    j = to_torch_complex(1j, device)
-    ei = to_torch_complex(cfg.Ei, device)
+    #j = to_torch_complex(1j, device)
+    #ei = to_torch_complex(cfg.Ei, device)
+    j = torch.tensor(1j, dtype=torch.complex64, device=device)
+    ei = torch.tensor(cfg.Ei, dtype=torch.complex64, device=device)
+
 
     l_pde = coating_pde_loss(model, collocation, n2, l_ref)
 
@@ -322,8 +319,10 @@ def evaluate_piecewise_field(
     k1, k3 = phys["k1"], phys["k3"]
     d, l_ref = phys["d"], phys["l_ref"]
 
-    j = to_torch_complex(1j, x_grid.device)
-    ei = to_torch_complex(cfg.Ei, x_grid.device)
+    # j = to_torch_complex(1j, x_grid.device)
+    # ei = to_torch_complex(cfg.Ei, x_grid.device)
+    j = torch.tensor(1j, dtype=torch.complex64, device=device)
+    ei = torch.tensor(cfg.Ei, dtype=torch.complex64, device=device)
 
     x = x_grid
     out = torch.zeros((x.shape[0], 1), dtype=torch.complex64, device=x.device)
@@ -380,10 +379,6 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
         "x_right": float(x_right),
     }
 
-    #x_f = sample_uniform(0.0, d, cfg.n_collocation_coating, device)
-    x_f = lhs(1, cfg.n_collocation_coating) * d
-    x_f = torch.tensor(x_f, dtype=torch.float32, device=device)
-
     model = FCNComplex(cfg.layers).to(device)
     scat = ScatteringCoeffs().to(device)
 
@@ -405,6 +400,9 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     t0 = time.time()
     model.train()
     scat.train()
+
+    x_f = lhs(1, cfg.n_collocation_coating) * d
+    x_f = torch.tensor(x_f, dtype=torch.float32, device=device)
 
     for ep in range(1, cfg.epochs + 1):
         if ep % 10 ==0:
