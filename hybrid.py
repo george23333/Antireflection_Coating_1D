@@ -43,8 +43,8 @@ class PINNConfig:
     left_wavelengths: float = 1.0
     right_wavelengths: float = 1.0
 
-    # Network / training
-    layers: tuple[int, ...] = (1, 64, 64, 64, 64, 2)
+    # Network and training
+    layers: tuple[int, ...] = (1, 50, 50, 50, 50, 2)
     epochs: int = 5000
     lr: float = 1e-3
     #init_rt_from_analytic: bool = False
@@ -184,14 +184,13 @@ class FCNComplex(nn.Module):
             nn.init.zeros_(layer.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Keep input dtype consistent with layer weights (float32/float32).
-        y = x.to(dtype=self.linears[0].weight.dtype)
+        y = x.to(torch.float32)
         for layer in self.linears[:-1]:
             y = self.activation(layer(y))
         return self.linears[-1](y)
 
     def complex_field(self, x: torch.Tensor) -> torch.Tensor:
-        y = self.forward(x)
+        y = self(x)
         return torch.complex(y[:, 0], y[:, 1]).unsqueeze(1)
 
 
@@ -216,11 +215,7 @@ class ScatteringCoeffs(nn.Module):
 # Derivatives / losses
 # ---------------------------------------------------------------------
 
-def field_and_derivatives(
-    model: FCNComplex,
-    x: torch.Tensor,
-    create_graph: bool = True,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def field_and_derivatives(model: FCNComplex, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     x = x.clone().detach().requires_grad_(True)
     y = model(x)
 
@@ -231,7 +226,7 @@ def field_and_derivatives(
             u,
             x,
             grad_outputs=torch.ones_like(u),
-            create_graph=create_graph,
+            create_graph=True,
             retain_graph=True,
         )[0]
 
@@ -241,12 +236,13 @@ def field_and_derivatives(
     e = torch.complex(e_re, e_im)
     de = torch.complex(de_re, de_im)
     d2e = torch.complex(d2e_re, d2e_im)
+    
     return e, de, d2e
 
 
 def coating_pde_loss(model: FCNComplex, x_phys: torch.Tensor, n2: float, l_ref: float) -> torch.Tensor:
     x_hat = x_phys / l_ref
-    e, _, d2e = field_and_derivatives(model, x_hat, create_graph=True)
+    e, _, d2e = field_and_derivatives(model, x_hat)
     residual = d2e + (2.0 * np.pi * n2) ** 2 * e
     return complex_mse(residual)
 
@@ -273,8 +269,8 @@ def compute_losses(
     x0 = torch.tensor([[0.0]], dtype=torch.float32, device=device)
     xd = torch.tensor([[d]], dtype=torch.float32, device=device)
 
-    e2_0, de2_0_hat, _ = field_and_derivatives(model, x0 / l_ref, create_graph=True)
-    e2_d, de2_d_hat, _ = field_and_derivatives(model, xd / l_ref, create_graph=True)
+    e2_0, de2_0_hat, _ = field_and_derivatives(model, x0 / l_ref)
+    e2_d, de2_d_hat, _ = field_and_derivatives(model, xd / l_ref)
 
     de2_0 = de2_0_hat / l_ref
     de2_d = de2_d_hat / l_ref
@@ -453,8 +449,8 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
         x0 = torch.tensor([[0.0]], dtype=torch.float32, device=device)
         xd = torch.tensor([[d]], dtype=torch.float32, device=device)
 
-        e2_0, de2_0_hat, _ = field_and_derivatives(model, x0 / l_ref, create_graph=True)
-        e2_d, de2_d_hat, _ = field_and_derivatives(model, xd / l_ref, create_graph=True)
+        e2_0, de2_0_hat, _ = field_and_derivatives(model, x0 / l_ref)
+        e2_d, de2_d_hat, _ = field_and_derivatives(model, xd / l_ref)
 
     de2_0 = de2_0_hat / l_ref
     de2_d = de2_d_hat / l_ref
