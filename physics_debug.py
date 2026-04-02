@@ -26,6 +26,8 @@ def main():
     # pertubed d
     d = d * 1.0
 
+    print(d)
+
     print("=== Parameters ===")
     print(f"n1 = {n1:.4f}, n2 = {n2:.4f}, n3 = {n3:.4f}")
     print(f"d  = {d:.4e} m")

@@ -45,9 +45,8 @@ class PINNConfig:
 
     # Network and training
     layers: tuple[int, ...] = (1, 50, 50, 50, 50, 2)
-    epochs: int = 5000
+    epochs: int = 4500
     lr: float = 1e-3
-    #init_rt_from_analytic: bool = False
     n_collocation_coating: int = 400
 
     # Loss weights
@@ -59,7 +58,7 @@ class PINNConfig:
     print_every: int = 200
     n_plot: int = 1200
     freq_probe_points: int = 101
-    plot_results: bool = True
+    #plot_results: bool = True
 
 
 # ---------------------------------------------------------------------
@@ -240,8 +239,8 @@ def field_and_derivatives(model: FCNComplex, x: torch.Tensor) -> tuple[torch.Ten
     return e, de, d2e
 
 
-def coating_pde_loss(model: FCNComplex, x_phys: torch.Tensor, n2: float, l_ref: float) -> torch.Tensor:
-    x_hat = x_phys / l_ref
+def coating_pde_loss(model: FCNComplex, x: torch.Tensor, n2: float, l_ref: float) -> torch.Tensor:
+    x_hat = x / l_ref  # l_ref is the normalization length
     e, _, d2e = field_and_derivatives(model, x_hat)
     residual = d2e + (2.0 * np.pi * n2) ** 2 * e
     return complex_mse(residual)
@@ -255,21 +254,20 @@ def compute_losses(
     phys: dict[str, float],
 ) -> dict[str, torch.Tensor]:
     k0, k1, k3 = phys["k0"], phys["k1"], phys["k3"]
-    n1, n3 = phys["n1"], phys["n3"]
-    n2, d, l_ref = phys["n2"], phys["d"], phys["l_ref"]
+    n1, n2, n3 = phys["n1"], phys["n2"], phys["n3"]
+    d, l_ref = phys["d"], phys["l_ref"]
 
-    #j = to_torch_complex(1j, device)
-    #ei = to_torch_complex(cfg.Ei, device)
     j = torch.tensor(1j, dtype=torch.complex64, device=device)
     ei = torch.tensor(cfg.Ei, dtype=torch.complex64, device=device)
 
 
     l_pde = coating_pde_loss(model, collocation, n2, l_ref)
 
+    # Define the interface locations
     x0 = torch.tensor([[0.0]], dtype=torch.float32, device=device)
     xd = torch.tensor([[d]], dtype=torch.float32, device=device)
 
-    e2_0, de2_0_hat, _ = field_and_derivatives(model, x0 / l_ref)
+    e2_0, de2_0_hat, _ = field_and_derivatives(model, x0 / l_ref) # E_2(0), dE_2/dx_hat(0)
     e2_d, de2_d_hat, _ = field_and_derivatives(model, xd / l_ref)
 
     de2_0 = de2_0_hat / l_ref
@@ -278,7 +276,7 @@ def compute_losses(
     e1_0 = ei * (1.0 + scat.r)
     de1_0 = ei * (-j * k1 + j * k1 * scat.r)
 
-    e3_d = ei * scat.t
+    e3_d = ei * scat.t * torch.exp(-j * k3 * d)
     de3_d = -j * k3 * e3_d
 
     l_if = (
@@ -315,8 +313,6 @@ def evaluate_piecewise_field(
     k1, k3 = phys["k1"], phys["k3"]
     d, l_ref = phys["d"], phys["l_ref"]
 
-    # j = to_torch_complex(1j, x_grid.device)
-    # ei = to_torch_complex(cfg.Ei, x_grid.device)
     j = torch.tensor(1j, dtype=torch.complex64, device=device)
     ei = torch.tensor(cfg.Ei, dtype=torch.complex64, device=device)
 
@@ -328,16 +324,9 @@ def evaluate_piecewise_field(
     right = x[:, 0] > d
 
     with torch.inference_mode():
-        if left.any():
-            xx = x[left]
-            out[left] = ei * (torch.exp(-j * k1 * xx) + scat.r * torch.exp(j * k1 * xx))
-
-        if coat.any():
-            out[coat] = model.complex_field(x[coat] / l_ref)
-
-        if right.any():
-            xx = x[right]
-            out[right] = ei * scat.t * torch.exp(-j * k3 * (xx - d))
+        out[left] = ei * (torch.exp(-j * k1 * x[left]) + scat.r * torch.exp(j * k1 * x[left]))
+        out[coat] = model.complex_field(x[coat] / l_ref)
+        out[right] = ei * scat.t * torch.exp(-j * k3 * x[right])
 
     return out
 
@@ -350,7 +339,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     n1 = np.sqrt(cfg.eps_r1 * cfg.mu_r)
     n3 = np.sqrt(cfg.eps_r3 * cfg.mu_r)
     n2, d = compute_optimal_layer(cfg.f0, cfg.eps_r1, cfg.eps_r3, cfg.mu_r)
-
+    
     lambda1 = C0 / (cfg.f0 * n1)
     lambda3 = C0 / (cfg.f0 * n3)
     l_ref = C0 / cfg.f0
@@ -378,14 +367,6 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     model = FCNComplex(cfg.layers).to(device)
     scat = ScatteringCoeffs().to(device)
 
-    # if cfg.init_rt_from_analytic:
-    #     amps0 = solve_single_layer_analytic(cfg.f0, n1, n2, n3, d)
-    #     with torch.no_grad():
-    #         scat.r_re.copy_(torch.tensor(np.real(amps0["r"]), device=device))
-    #         scat.r_im.copy_(torch.tensor(np.imag(amps0["r"]), device=device))
-    #         scat.t_re.copy_(torch.tensor(np.real(amps0["t"]), device=device))
-    #         scat.t_im.copy_(torch.tensor(np.imag(amps0["t"]), device=device))
-
     optimizer = torch.optim.Adam(
         list(model.parameters()) + list(scat.parameters()),
         lr=cfg.lr,
@@ -393,7 +374,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
 
     loss_hist = {"total": [], "pde": [], "if": [], "energy": []}
 
-    t0 = time.time()
+    start_time = time.time()
     model.train()
     scat.train()
 
@@ -423,13 +404,12 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
                 f"en={losses['energy'].item():.3e}"
             )
 
-    train_time = time.time() - t0
+    train_time = time.time() - start_time
     print(f"Training time: {train_time:.2f} seconds")
 
     # Evaluation
     model.eval()
     scat.eval()
-
     x_grid = torch.linspace(x_left, x_right, cfg.n_plot, device=device).unsqueeze(1)
     e_pred = evaluate_piecewise_field(model, scat, cfg, x_grid, phys)
 
@@ -457,7 +437,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
 
     e1_0 = cfg.Ei * (1.0 + r_pinn)
     de1_0 = cfg.Ei * (-1j * k1 + 1j * k1 * r_pinn)
-    e3_d = cfg.Ei * t_pinn
+    e3_d = cfg.Ei * t_pinn *np.exp(-1j * k3 * d)
     de3_d = -1j * k3 * e3_d
 
     if_l2 = float(
@@ -480,69 +460,66 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     print("\n=== Forward PINN Metrics ===")
     print(f"n1={n1:.6f}, n2_opt={n2:.6f}, n3={n3:.6f}")
     print(f"d_opt={d:.6e} m")
-    print(f"PINN: r={r_pinn:.6f}, t={t_pinn:.6f}, R={R_pinn:.3e}, T={T_pinn:.3e}, R+T={R_pinn+T_pinn:.6f}")
-    print(f"ANLT: r={r_an:.6f}, t={t_an:.6f}, R={R_an:.3e}, T={T_an:.3e}, R+T={R_an+T_an:.6f}")
-    print(f"|R_pinn - R_an| = {abs(R_pinn - R_an):.3e}")
+    print(f"PINN: r={r_pinn:.6f}, t={t_pinn:.6f}, R={R_pinn:.3e}, T={T_pinn:.3e}, R+T={R_pinn+T_pinn:.6e}")
+    print(f"ANLT: r={r_an:.6f}, t={t_an:.6f}, R={R_an:.3e}, T={T_an:.3e}, R+T={R_an+T_an:.6e}")
     print(f"Interface continuity error = {if_l2:.3e}")
     print(f"Perturbation check: R(d_opt)={R_an:.3e}, R(1.2*d_opt)={R_pert:.3e}")
 
-    if cfg.plot_results:
-        plt.figure(figsize=(10, 7))
-        plot_curve(
-            x_np, np.abs(e_an_np),
-            label="|E| Analytic",
-            xlabel="x [m]",
-            ylabel="|E(x)|",
-            title="Field Magnitude: PINN vs Analytic",
-            vlines=[0.0, d],
-        )
-        plt.plot(x_np, np.abs(e_pred_np), "--", label="|E| PINN")
-        plt.legend()
-        plt.show()
+    plt.figure(figsize=(10, 7))
+    plot_curve(
+        x_np, np.abs(e_an_np),
+        label="|E| Analytic",
+        xlabel="x [m]",
+        ylabel="|E(x)|",
+        title="Field Magnitude: PINN vs Analytic",
+        vlines=[0.0, d],
+    )
+    plt.plot(x_np, np.abs(e_pred_np), "--", label="|E| PINN")
+    plt.legend()
+    plt.show()
 
-        plt.figure(figsize=(10, 7))
-        plot_curve(
-            x_np, np.unwrap(np.angle(e_an_np)),
-            label="Phase Analytic",
-            xlabel="x [m]",
-            ylabel="Phase [rad]",
-            title="Field Phase: PINN vs Analytic",
-            vlines=[0.0, d],
-        )
-        plt.plot(x_np, np.unwrap(np.angle(e_pred_np)), "--", label="Phase PINN")
-        plt.legend()
-        plt.show()
+    plt.figure(figsize=(10, 7))
+    plot_curve(
+        x_np, np.unwrap(np.angle(e_an_np)),
+        label="Phase Analytic",
+        xlabel="x [m]",
+        ylabel="Phase [rad]",
+        title="Field Phase: PINN vs Analytic",
+        vlines=[0.0, d],
+    )
+    plt.plot(x_np, np.unwrap(np.angle(e_pred_np)), "--", label="Phase PINN")
+    plt.legend()
+    plt.show()
 
-        plt.figure(figsize=(10, 7))
-        for key, label in [
-            ("total", "Total Loss"),
-            ("pde", "PDE Loss"),
-            ("if", "Interface Loss"),
-            ("energy", "Energy Loss"),
-        ]:
-            plt.plot(loss_hist[key], label=label)
-        plt.yscale("log")
-        plt.xlabel("Iteration")
-        plt.ylabel("Loss")
-        plt.title("Training Losses")
-        plt.minorticks_on()
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
+    plt.figure(figsize=(10, 7))
+    for key, label in [
+        ("total", "Total Loss"),
+        ("pde", "PDE Loss"),
+        ("if", "Interface Loss"),
+        ("energy", "Energy Loss"),
+    ]:
+        plt.plot(loss_hist[key], label=label)
+    plt.yscale("log")
+    plt.xlabel("Iteration")
+    plt.ylabel("Loss")
+    plt.title("Training Losses")
+    plt.minorticks_on()
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
 
-        plt.figure(figsize=(10, 7))
-        plt.plot(f_probe / 1e9, R_probe, label="Analytic Reflectance (fixed d_opt)")
-        plt.scatter([cfg.f0 / 1e9], [R_pinn], color="red", s=40, label="PINN @ f0")
-        plt.xlabel("Frequency [GHz]")
-        plt.ylabel("Reflectance R")
-        plt.title("Frequency Characteristic")
-        plt.minorticks_on()
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
+    plt.figure(figsize=(10, 7))
+    plt.plot(f_probe / 1e9, R_probe, label="Analytic Reflectance (fixed d_opt)")
+    plt.scatter([cfg.f0 / 1e9], [R_pinn], color="red", s=40, label="PINN @ f0")
+    plt.xlabel("Frequency [GHz]")
+    plt.ylabel("Reflectance R")
+    plt.title("Frequency Characteristic")
+    plt.minorticks_on()
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
 
     return {
-        "config": asdict(cfg),
         "n1": float(n1),
         "n2_opt": float(n2),
         "n3": float(n3),
@@ -552,19 +529,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
         "R_pinn": float(R_pinn),
         "T_pinn": float(T_pinn),
         "energy_sum_pinn": float(R_pinn + T_pinn),
-        "r_analytic": r_an,
-        "t_analytic": t_an,
-        "R_analytic": float(R_an),
-        "T_analytic": float(T_an),
-        "energy_sum_analytic": float(R_an + T_an),
-        "R_abs_error": float(abs(R_pinn - R_an)),
         "interface_l2_error": float(if_l2),
-        "R_perturbed_d_1p2": float(R_pert),
-        "train_time_s": float(train_time),
-        "final_loss_total": float(loss_hist["total"][-1]),
-        "final_loss_pde": float(loss_hist["pde"][-1]),
-        "final_loss_if": float(loss_hist["if"][-1]),
-        "final_loss_energy": float(loss_hist["energy"][-1]),
         "loss_history": loss_hist,
     }
 
