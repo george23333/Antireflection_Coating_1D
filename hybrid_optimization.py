@@ -364,10 +364,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     model = FCNComplex(cfg.layers).to(device)
     scat = ScatteringCoeffs().to(device)
 
-    optimizer = torch.optim.Adam(
-        list(model.parameters()) + list(scat.parameters()),
-        lr=cfg.lr,
-    )
+    optimizer = torch.optim.Adam(list(model.parameters()) + list(scat.parameters()), lr=cfg.lr)
 
     loss_hist = {"total": [], "pde": [], "if": [], "energy": []}
 
@@ -375,15 +372,16 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     model.train()
     scat.train()
 
-    x_f = lhs(1, cfg.n_collocation_coating) * d
-    x_f = torch.tensor(x_f, dtype=torch.float32, device=device)
+    x_collocation = lhs(1, cfg.n_collocation_coating) * d
+    x_collocation = torch.tensor(x_collocation, dtype=torch.float32, device=device)
 
+    # Training
     for ep in range(1, cfg.epochs + 1):
         if ep % 10 ==0:
-            x_f = lhs(1, cfg.n_collocation_coating) * d
-            x_f = torch.tensor(x_f, dtype=torch.float32, device=device)
+            x_collocation = lhs(1, cfg.n_collocation_coating) * d
+            x_collocation = torch.tensor(x_collocation, dtype=torch.float32, device=device)
             
-        losses = compute_losses(model, scat, cfg, x_f, phys)
+        losses = compute_losses(model, scat, cfg, x_collocation, phys)
 
         optimizer.zero_grad()
         losses["total"].backward()
@@ -426,16 +424,16 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
         x0 = torch.tensor([[0.0]], dtype=torch.float32, device=device)
         xd = torch.tensor([[d]], dtype=torch.float32, device=device)
 
-        e2_0, de2_0_hat, _ = field_and_derivatives(model, x0 / l_ref)
-        e2_d, de2_d_hat, _ = field_and_derivatives(model, xd / l_ref)
+        e2_0, de2_dx_hat_0, _ = field_and_derivatives(model, x0 / l_ref)    # E2(0), dE2/dx_hat(0)
+        e2_d, de2_dx_hat_d, _ = field_and_derivatives(model, xd / l_ref)    # E2(d), dE2/dx_hat(d)
 
-    de2_0 = de2_0_hat / l_ref
-    de2_d = de2_d_hat / l_ref
+    de2_0 = de2_dx_hat_0 / l_ref                                            # dE2/dx(0)
+    de2_d = de2_dx_hat_d / l_ref                                            # dE2/dx(d)
 
-    e1_0 = cfg.Ei * (1.0 + r_pinn)
-    de1_0 = cfg.Ei * (-1j * k1 + 1j * k1 * r_pinn)
-    e3_d = cfg.Ei * t_pinn *np.exp(-1j * k3 * d)
-    de3_d = -1j * k3 * e3_d
+    e1_0 = cfg.Ei * (1.0 + r_pinn)                                          # E1(0)
+    de1_0 = cfg.Ei * (-1j * k1 + 1j * k1 * r_pinn)                          # dE1/dx(0)
+    e3_d = cfg.Ei * t_pinn * np.exp(-1j * k3 * d)                            # E3(d)
+    de3_d = -1j * k3 * e3_d                                                 # dE3/dx(d)
 
     if_l2 = float(
         abs(complex(e2_0.detach().cpu().numpy().item()) - e1_0) ** 2
