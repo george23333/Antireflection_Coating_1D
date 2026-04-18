@@ -44,7 +44,7 @@ class PINNConfig:
 
     # Network / training
     layers: tuple[int, ...] = (1, 50, 50, 50, 50, 2)
-    epochs: int = 6000
+    epochs: int = 15000
     lr: float = 1e-3
     n_collocation: int = 1200
     resample_every: int = 10
@@ -89,6 +89,40 @@ def plot_curve(x, y, *, label, xlabel, ylabel, title, style="-", vlines=None):
 def sample_interval_lhs(n_points: int, x_min: float, x_max: float) -> torch.Tensor:
     points = x_min + lhs(1, n_points) * (x_max - x_min)
     return torch.tensor(points, dtype=torch.float64, device=device)
+
+
+# def split_point_counts(total_points: int, weights: list[float]) -> list[int]:
+#     weights_arr = np.asarray(weights, dtype=np.float64)
+#     active = weights_arr > 0.0
+#     counts = np.zeros_like(weights_arr, dtype=int)
+
+#     if total_points <= 0 or not np.any(active):
+#         return counts.tolist()
+
+#     n_active = int(np.count_nonzero(active))
+#     remaining = int(total_points)
+
+#     if remaining >= n_active:
+#         counts[active] = 1
+#         remaining -= n_active
+
+#     if remaining <= 0:
+#         return counts.tolist()
+
+#     normalized = np.zeros_like(weights_arr, dtype=np.float64)
+#     normalized[active] = weights_arr[active] / weights_arr[active].sum()
+
+#     raw_extra = remaining * normalized
+#     extra = np.floor(raw_extra).astype(int)
+#     counts += extra
+
+#     leftover = remaining - int(extra.sum())
+#     if leftover > 0:
+#         order = np.argsort(-(raw_extra - extra))
+#         for idx in order[:leftover]:
+#             counts[idx] += 1
+
+#     return counts.tolist()
 
 
 # ---------------------------------------------------------------------
@@ -171,7 +205,7 @@ def analytic_field(
 
 
 # ---------------------------------------------------------------------
-# PINN modules
+# PINN model
 # ---------------------------------------------------------------------
 
 class FCNComplex(nn.Module):
@@ -208,9 +242,33 @@ def refractive_index_profile(x: torch.Tensor, phys: dict[str, float]) -> torch.T
     return n
 
 
-# ---------------------------------------------------------------------
-# Derivatives / losses
-# --------------------------------------------------------------------- 
+# def domain_segments(phys: dict[str, float]) -> list[tuple[float, float, float]]:
+#     return [
+#         (phys["x_left"], 0.0, phys["n1"]),
+#         (0.0, phys["d"], phys["n2"]),
+#         (phys["d"], phys["x_right"], phys["n3"]),
+#     ]
+
+
+# def sample_domain_points_by_optical_length(n_points: int, phys: dict[str, float]) -> torch.Tensor:
+#     segments = domain_segments(phys)
+#     optical_weights = [max((x1 - x0) * n_seg, 0.0) for x0, x1, n_seg in segments]
+#     counts = split_point_counts(n_points, optical_weights)
+
+#     points = [
+#         sample_interval_lhs(count, x0, x1)
+#         for count, (x0, x1, _) in zip(counts, segments)
+#         if count > 0
+#     ]
+
+#     if not points:
+#         return torch.empty((0, 1), dtype=torch.float64, device=device)
+
+#     x = torch.cat(points, dim=0)
+#     if x.shape[0] > 1:
+#         x = x[torch.randperm(x.shape[0], device=device)]
+#     return x
+
 
 def total_field_and_derivatives(
     model: nn.Module,
@@ -223,7 +281,9 @@ def total_field_and_derivatives(
     j = torch.tensor(1j, dtype=torch.complex128, device=device)
     ei = torch.tensor(cfg.Ei, dtype=torch.complex128, device=device)
 
-    u = model.complex_field(x / phys["l_ref"])
+    # Neural correction
+    y = model(x / phys["l_ref"])
+    u = torch.complex(y[:, 0:1], y[:, 1:2])
 
     # Known incoming wave
     e_inc = ei * torch.exp(-j * phys["k1"] * x)
@@ -231,11 +291,11 @@ def total_field_and_derivatives(
     # Total field
     e_total = e_inc + u
 
-    def grad(u: torch.Tensor) -> torch.Tensor:
+    def grad(u_scalar: torch.Tensor) -> torch.Tensor:
         return autograd.grad(
-            u,
+            u_scalar,
             x,
-            grad_outputs=torch.ones_like(u),
+            grad_outputs=torch.ones_like(u_scalar),
             create_graph=True,
             retain_graph=True,
         )[0]
@@ -251,6 +311,10 @@ def total_field_and_derivatives(
     return e_total, de_total, d2e_total
 
 
+# ---------------------------------------------------------------------
+# Boundary diagnostics and losses
+# ---------------------------------------------------------------------
+
 def boundary_diagnostics(
     model: nn.Module,
     cfg: PINNConfig,
@@ -265,14 +329,16 @@ def boundary_diagnostics(
     e_left, de_left, _ = total_field_and_derivatives(model, x_left, cfg, phys)
     e_right, de_right, _ = total_field_and_derivatives(model, x_right, cfg, phys)
 
-    k0, k1, k3 = phys["k0"], phys["k1"], phys["k3"]
-    n1, n3 = phys["n1"], phys["n3"]
+    k0 = phys["k0"]
+    k1 = phys["k1"]
+    k3 = phys["k3"]
+    n1 = phys["n1"]
+    n3 = phys["n3"]
 
-    # Abosorbing boundary condions
+    # Total-field ABCs
     bc_left = (de_left - j * k1 * e_left + 2.0 * j * k1 * ei * torch.exp(-j * k1 * x_left)) / k0
     bc_right = (de_right + j * k3 * e_right) / k0
 
-    # Scattering coefficient extraction
     exp_in = torch.exp(-j * k1 * x_left)
     exp_ref = torch.exp(j * k1 * x_left)
     exp_tr = torch.exp(-j * k3 * x_right)
@@ -310,7 +376,8 @@ def compute_losses(
     e, _, d2e = total_field_and_derivatives(model, collocation, cfg, phys)
     n_profile = refractive_index_profile(collocation, phys)
 
-    # PDE loss
+    # Physical-coordinate Helmholtz equation:
+    # d²E/dx² + (k0 n)^2 E = 0
     residual = d2e + (phys["k0"] * n_profile).square() * e
     l_pde = complex_mse(residual / (phys["k0"] ** 2))
 
@@ -405,10 +472,12 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     start_time = time.time()
     model.train()
 
+    #x_collocation = sample_domain_points_by_optical_length(cfg.n_collocation, phys)
     x_collocation = sample_interval_lhs(cfg.n_collocation, x_left, x_right)
 
     for ep in range(1, cfg.epochs + 1):
         if ep > 1 and ep % cfg.resample_every == 0:
+            #x_collocation = sample_domain_points_by_optical_length(cfg.n_collocation, phys)
             x_collocation = sample_interval_lhs(cfg.n_collocation, x_left, x_right)
 
         losses = compute_losses(model, cfg, x_collocation, phys)

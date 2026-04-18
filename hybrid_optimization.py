@@ -54,6 +54,33 @@ class PINNConfig:
     w_if: float = 50.0
     w_energy: float = 2.0
 
+    # Dynamic loss weighting
+    dynamic_loss_weights: bool = False
+    dynamic_weight_ema: float = 0.95
+    dynamic_weight_min_ratio: float = 0.2
+    dynamic_weight_max_ratio: float = 5.0
+
+    # Dynamic collocation sampling
+    dynamic_collocation: bool = False
+    collocation_resample_every: int = 10
+    collocation_hard_ratio: float = 0.3
+    collocation_hard_start_epoch: int = 1000
+    collocation_candidate_factor: int = 5
+
+    # Learning-rate scheduler
+    use_lr_scheduler: bool = False
+    scheduler_type: str = "cosine"  # "cosine" | "step"
+    scheduler_eta_min: float = 1e-5
+    scheduler_step_size: int = 1000
+    scheduler_gamma: float = 0.5
+
+    # Second-order optimizer (Adam -> LBFGS)
+    use_lbfgs: bool = False
+    lbfgs_lr: float = 1.0
+    lbfgs_max_iter: int = 300
+    lbfgs_history_size: int = 100
+    lbfgs_line_search_fn: str = "strong_wolfe"
+
     # Output
     print_every: int = 200
     n_plot: int = 1500
@@ -83,6 +110,129 @@ def plot_curve(x, y, *, label, xlabel, ylabel, title, style="-", vlines=None):
     plt.minorticks_on()
     plt.legend()
     plt.tight_layout()
+
+
+class DynamicLossWeights:
+    def __init__(self, cfg: PINNConfig):
+        self.names = ("pde", "if", "energy")
+        self.base = {
+            "pde": float(cfg.w_pde),
+            "if": float(cfg.w_if),
+            "energy": float(cfg.w_energy),
+        }
+        self.current = self.base.copy()
+        self.ema = cfg.dynamic_weight_ema
+        self.min_ratio = cfg.dynamic_weight_min_ratio
+        self.max_ratio = cfg.dynamic_weight_max_ratio
+
+    def weights(self) -> dict[str, float]:
+        return self.current.copy()
+
+    def update(self, losses: dict[str, torch.Tensor]) -> dict[str, float]:
+        values = {
+            name: max(losses[name].item(), 1e-12)
+            for name in self.names
+        }
+
+        mean_loss = sum(values.values()) / len(values)
+
+        new_weights = {}
+        for name in self.names:
+            ratio = mean_loss / values[name]
+            ratio = np.clip(ratio, self.min_ratio, self.max_ratio)   # optional clipping
+            new_weights[name] = self.base[name] * ratio
+
+        # optional smoothing
+        for name in self.names:
+            self.current[name] = (
+                self.ema * self.current[name]
+                + (1 - self.ema) * new_weights[name]
+            )
+
+        return self.current
+
+
+def default_loss_weights(cfg: PINNConfig) -> dict[str, float]:
+    return {"pde": float(cfg.w_pde), "if": float(cfg.w_if), "energy": float(cfg.w_energy)}
+
+
+def pde_residual_abs2(model: "FCNComplex", x: torch.Tensor, n2: float, l_ref: float) -> torch.Tensor:
+    with torch.enable_grad():
+        e, _, d2e = field_and_derivatives(model, x / l_ref)
+        residual = d2e + (2.0 * np.pi * n2) ** 2 * e
+    return complex_abs2(residual).detach().squeeze(1)
+
+
+def sample_collocation_points(
+    model: "FCNComplex | None",
+    cfg: PINNConfig,
+    phys: dict[str, float],
+    epoch: int,
+) -> torch.Tensor:
+    d = phys["d"]
+    n_total = cfg.n_collocation_coating
+
+    x = lhs(1, n_total) * d
+    x = torch.tensor(x, dtype=torch.float32, device=device)
+
+    if not cfg.dynamic_collocation:
+        return x
+
+    # Number of hard points to insert
+    n_hard = int(cfg.collocation_hard_ratio * n_total)
+
+    # Add hard points only after a chosen epoch
+    if model is not None and epoch >= cfg.collocation_hard_start_epoch:
+        n_candidates = max(n_total, int(cfg.collocation_candidate_factor * n_total))
+
+        # Large candidate pool
+        candidates = lhs(1, n_candidates) * d
+        candidates = torch.tensor(candidates, dtype=torch.float32, device=device)
+
+        # Score candidates by PDE residual
+        residual_score = pde_residual_abs2(model, candidates, phys["n2"], phys["l_ref"])
+
+        # Pick the hardest ones
+        topk = torch.topk(
+            residual_score,
+            k=min(n_hard, candidates.shape[0]),
+            largest=True
+        ).indices
+        hard_points = candidates[topk]
+
+        # Keep some uniform points, replace the rest by hard points
+        n_keep = n_total - hard_points.shape[0]
+        if n_keep > 0:
+            keep_idx = torch.randperm(x.shape[0], device=device)[:n_keep]
+            x = torch.cat([x[keep_idx], hard_points], dim=0)
+        else:
+            x = hard_points
+
+    # Shuffle points
+    x = x[torch.randperm(x.shape[0], device=device)]
+
+    return x
+
+
+def build_lr_scheduler(optimizer: torch.optim.Optimizer, cfg: PINNConfig):
+    if not cfg.use_lr_scheduler:
+        return None
+
+    scheduler_type = cfg.scheduler_type
+    if scheduler_type == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=cfg.epochs,
+            eta_min=cfg.scheduler_eta_min,
+        )
+    if scheduler_type == "step":
+        return torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=cfg.scheduler_step_size,
+            gamma=cfg.scheduler_gamma,
+        )
+
+    raise ValueError(f"Unsupported scheduler_type='{cfg.scheduler_type}'")
 
 
 # ---------------------------------------------------------------------
@@ -250,6 +400,7 @@ def compute_losses(
     cfg: PINNConfig,
     collocation: torch.Tensor,
     phys: dict[str, float],
+    weights: dict[str, float] | None = None,
 ) -> dict[str, torch.Tensor]:
     k0, k1, k3 = phys["k0"], phys["k1"], phys["k3"]
     n1, n2, n3 = phys["n1"], phys["n2"], phys["n3"]
@@ -289,7 +440,9 @@ def compute_losses(
     energy_balance = complex_abs2(scat.r) + (n3 / n1) * complex_abs2(scat.t) - 1.0
     l_energy = energy_balance.square().mean()
 
-    l_total = cfg.w_pde * l_pde + cfg.w_if * l_if + cfg.w_energy * l_energy
+    if weights is None:
+        weights = default_loss_weights(cfg)
+    l_total = weights["pde"] * l_pde + weights["if"] * l_if + weights["energy"] * l_energy
 
     return {"total": l_total, "pde": l_pde, "if": l_if, "energy": l_energy,}
 
@@ -364,31 +517,56 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     model = FCNComplex(cfg.layers).to(device)
     scat = ScatteringCoeffs().to(device)
 
-    optimizer = torch.optim.Adam(list(model.parameters()) + list(scat.parameters()), lr=cfg.lr)
+    params = list(model.parameters()) + list(scat.parameters())
+    optimizer = torch.optim.Adam(params, lr=cfg.lr)
+    scheduler = build_lr_scheduler(optimizer, cfg)
 
-    loss_hist = {"total": [], "pde": [], "if": [], "energy": []}
+    loss_hist = {"total": [], "pde": [], "if": [], "energy": [], "lr": []}
+    weight_hist = {"pde": [], "if": [], "energy": []}
+
+    weight_adapter = DynamicLossWeights(cfg) if cfg.dynamic_loss_weights else None
+    current_weights = weight_adapter.weights() if weight_adapter is not None else default_loss_weights(cfg)
 
     start_time = time.time()
     model.train()
     scat.train()
 
-    x_collocation = lhs(1, cfg.n_collocation_coating) * d
-    x_collocation = torch.tensor(x_collocation, dtype=torch.float32, device=device)
+    resample_every = max(1, int(cfg.collocation_resample_every))
+    x_collocation = sample_collocation_points(
+        model if cfg.dynamic_collocation else None,
+        cfg,
+        phys,
+        epoch=1,
+    )
 
-    # Training
+    # Adam training
     for ep in range(1, cfg.epochs + 1):
-        if ep % 10 ==0:
-            x_collocation = lhs(1, cfg.n_collocation_coating) * d
-            x_collocation = torch.tensor(x_collocation, dtype=torch.float32, device=device)
-            
-        losses = compute_losses(model, scat, cfg, x_collocation, phys)
+        if ep > 1 and ep % resample_every == 0:
+            x_collocation = sample_collocation_points(
+                model if cfg.dynamic_collocation else None,
+                cfg,
+                phys,
+                epoch=ep,
+            )
+
+        losses = compute_losses(model, scat, cfg, x_collocation, phys, weights=current_weights)
 
         optimizer.zero_grad()
         losses["total"].backward()
         optimizer.step()
 
-        for key in loss_hist:
+        if scheduler is not None:
+            scheduler.step()
+
+        if weight_adapter is not None:
+            current_weights = weight_adapter.update(losses)
+
+        for key in ("total", "pde", "if", "energy"):
             loss_hist[key].append(losses[key].item())
+        loss_hist["lr"].append(float(optimizer.param_groups[0]["lr"]))
+
+        for key in ("pde", "if", "energy"):
+            weight_hist[key].append(float(current_weights[key]))
 
         if ep == 1 or ep % cfg.print_every == 0:
             print(
@@ -396,8 +574,50 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
                 f"total={losses['total'].item():.3e}, "
                 f"pde={losses['pde'].item():.3e}, "
                 f"if={losses['if'].item():.3e}, "
-                f"en={losses['energy'].item():.3e}"
+                f"en={losses['energy'].item():.3e}, "
+                f"lr={optimizer.param_groups[0]['lr']:.2e}, "
+                f"w_pde={current_weights['pde']:.2f}, "
+                f"w_if={current_weights['if']:.2f}, "
+                f"w_en={current_weights['energy']:.2f}"
             )
+
+    if cfg.use_lbfgs:
+        print("\nStarting LBFGS refinement...")
+        x_lbfgs = sample_collocation_points(
+            model if cfg.dynamic_collocation else None,
+            cfg,
+            phys,
+            epoch=cfg.epochs + 1,
+        )
+
+        lbfgs = torch.optim.LBFGS(
+            params,
+            lr=cfg.lbfgs_lr,
+            max_iter=cfg.lbfgs_max_iter,
+            history_size=cfg.lbfgs_history_size,
+            line_search_fn=cfg.lbfgs_line_search_fn,
+        )
+
+        def closure():
+            lbfgs.zero_grad()
+            lbfgs_losses = compute_losses(model, scat, cfg, x_lbfgs, phys, weights=current_weights)
+            lbfgs_losses["total"].backward()
+            return lbfgs_losses["total"]
+
+        lbfgs.step(closure)
+        lbfgs_eval = compute_losses(model, scat, cfg, x_lbfgs, phys, weights=current_weights)
+        for key in ("total", "pde", "if", "energy"):
+            loss_hist[key].append(lbfgs_eval[key].item())
+        for key in ("pde", "if", "energy"):
+            weight_hist[key].append(float(current_weights[key]))
+
+        print(
+            "LBFGS done: "
+            f"total={lbfgs_eval['total'].item():.3e}, "
+            f"pde={lbfgs_eval['pde'].item():.3e}, "
+            f"if={lbfgs_eval['if'].item():.3e}, "
+            f"en={lbfgs_eval['energy'].item():.3e}"
+        )
 
     train_time = time.time() - start_time
     print(f"Training time: {train_time:.2f} seconds")
@@ -502,6 +722,30 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     plt.legend()
     plt.tight_layout()
     plt.show()
+
+    if cfg.use_lr_scheduler:
+        plt.figure(figsize=(10, 4))
+        plt.plot(loss_hist["lr"], label="Learning Rate")
+        plt.xlabel("Iteration")
+        plt.ylabel("LR")
+        plt.title("Learning Rate Schedule")
+        plt.minorticks_on()
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+    if cfg.dynamic_loss_weights:
+        plt.figure(figsize=(10, 4))
+        plt.plot(weight_hist["pde"], label="w_pde")
+        plt.plot(weight_hist["if"], label="w_if")
+        plt.plot(weight_hist["energy"], label="w_energy")
+        plt.xlabel("Iteration")
+        plt.ylabel("Weight")
+        plt.title("Dynamic Loss Weights")
+        plt.minorticks_on()
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
 
     plt.figure(figsize=(10, 7))
     plt.plot(f_probe / 1e9, R_probe, label="Analytic Reflectance (fixed d_opt)")
