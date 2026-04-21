@@ -44,16 +44,22 @@ class PINNConfig:
 
     # Network / training
     layers: tuple[int, ...] = (1, 50, 50, 50, 50, 2)
-    epochs: int = 15000
-    lr: float = 1e-3
+    epochs: int = 8000
+    lr: float = 2e-3
     n_collocation: int = 1200
     resample_every: int = 10
 
     # Fixed loss weights
-    w_pde: float = 1.0
+    w_pde: float = 1.5
     w_bc: float = 20.0
-    w_energy: float = 5.0
-    w_extract: float = 0.0
+    w_energy: float = 5.5
+    w_extract: float = 1.0
+
+    use_lbfgs: bool = True
+    lbfgs_lr: float = 1.0
+    lbfgs_max_iter: int = 300
+    lbfgs_history_size: int = 100
+    lbfgs_line_search_fn: str = "strong_wolfe"
 
     # Output
     print_every: int = 200
@@ -498,6 +504,43 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
                 f"en={losses['energy'].item():.3e}, "
                 f"ext={losses['extract'].item():.3e}"
             )
+    
+    if cfg.use_lbfgs:
+        print("\nStarting LBFGS refinement...")
+
+        # Important: use a fixed collocation set during LBFGS
+        x_lbfgs = sample_interval_lhs(cfg.n_collocation, x_left, x_right)
+
+        lbfgs = torch.optim.LBFGS(
+            model.parameters(),
+            lr=cfg.lbfgs_lr,
+            max_iter=cfg.lbfgs_max_iter,
+            history_size=cfg.lbfgs_history_size,
+            line_search_fn=cfg.lbfgs_line_search_fn,
+        )
+
+        def closure():
+            lbfgs.zero_grad()
+            lbfgs_losses = compute_losses(model, cfg, x_lbfgs, phys)
+            lbfgs_losses["total"].backward()
+            return lbfgs_losses["total"]
+
+        lbfgs.step(closure)
+
+        lbfgs_eval = compute_losses(model, cfg, x_lbfgs, phys)
+
+        for key in ("total", "pde", "bc", "energy", "extract"):
+            loss_hist[key].append(lbfgs_eval[key].item())
+        #loss_hist["lr"].append(float(cfg.lbfgs_lr))
+
+        print(
+            "LBFGS done: "
+            f"total={lbfgs_eval['total'].item():.3e}, "
+            f"pde={lbfgs_eval['pde'].item():.3e}, "
+            f"bc={lbfgs_eval['bc'].item():.3e}, "
+            f"en={lbfgs_eval['energy'].item():.3e}, "
+            f"ext={lbfgs_eval['extract'].item():.3e}"
+        )
 
     train_time = time.time() - start_time
     print(f"Training time: {train_time:.2f} seconds")

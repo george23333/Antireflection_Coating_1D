@@ -44,16 +44,22 @@ class PINNConfig:
 
     # Network / training
     layers: tuple[int, ...] = (1, 50, 50, 50, 50, 2)
-    epochs: int = 6000
-    lr: float = 1e-3
+    epochs: int = 8000
+    lr: float = 2e-3
     n_collocation: int = 1200
     resample_every: int = 10
 
     # Fixed loss weights
-    w_pde: float = 1.0
+    w_pde: float = 1.5
     w_bc: float = 20.0
-    w_energy: float = 5.0
-    w_extract: float = 0.0
+    w_energy: float = 5.5
+    w_extract: float = 1.0
+
+    use_lbfgs: bool = True
+    lbfgs_lr: float = 1.0
+    lbfgs_max_iter: int = 300
+    lbfgs_history_size: int = 100
+    lbfgs_line_search_fn: str = "strong_wolfe"
 
     # Output
     print_every: int = 200
@@ -174,12 +180,26 @@ def analytic_field(
 # PINN modules
 # ---------------------------------------------------------------------
 
-class FCNComplex(nn.Module):
-    def __init__(self, layers: tuple[int, ...]):
+class FourierFeatureEncoding(nn.Module):
+    def __init__(self, in_dim: int = 1, m: int = 48, sigma: float = 5.0):
         super().__init__()
+        B = sigma * torch.randn(in_dim, m, dtype=torch.float64)
+        self.register_buffer("B", B)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        proj = 2.0 * np.pi * x @ self.B
+        return torch.cat([torch.sin(proj), torch.cos(proj)], dim=1)
+
+class FCNComplex(nn.Module):
+    def __init__(self, layers: tuple[int, ...], m: int = 48, sigma: float = 6.0):
+        super().__init__()
+        self.encoding = FourierFeatureEncoding(in_dim=1, m=m, sigma=sigma)
         self.activation = nn.Tanh()
+
+        # modify the first layer size from 1 to 2*m due to Fourier feature encoding
+        new_layers = [2 * m] + list(layers[1:])
         self.linears = nn.ModuleList(
-            nn.Linear(layers[i], layers[i + 1]) for i in range(len(layers) - 1)
+            nn.Linear(new_layers[i], new_layers[i + 1]) for i in range(len(new_layers) - 1)
         )
 
         for layer in self.linears:
@@ -188,6 +208,7 @@ class FCNComplex(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = x.to(torch.float64)
+        y = self.encoding(y)
         for layer in self.linears[:-1]:
             y = self.activation(layer(y))
         return self.linears[-1](y)
@@ -226,7 +247,7 @@ def total_field_and_derivatives(
     u = model.complex_field(x / phys["l_ref"])
 
     # Known incoming wave
-    e_inc = ei * torch.exp(-j * phys["k1"] * x)
+    e_inc = ei * torch.exp(-j * phys["k1"] * x) * 0.00
 
     # Total field
     e_total = e_inc + u
@@ -374,6 +395,8 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     n3 = np.sqrt(cfg.eps_r3 * cfg.mu_r)
     n2, d = compute_optimal_layer(cfg.f0, cfg.eps_r1, cfg.eps_r3, cfg.mu_r)
 
+    d = d * 1.00
+
     lambda1 = C0 / (cfg.f0 * n1)
     lambda3 = C0 / (cfg.f0 * n3)
 
@@ -429,6 +452,43 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
                 f"en={losses['energy'].item():.3e}, "
                 f"ext={losses['extract'].item():.3e}"
             )
+    
+    if cfg.use_lbfgs:
+        print("\nStarting LBFGS refinement...")
+
+        # Important: use a fixed collocation set during LBFGS
+        x_lbfgs = sample_interval_lhs(cfg.n_collocation, x_left, x_right)
+
+        lbfgs = torch.optim.LBFGS(
+            model.parameters(),
+            lr=cfg.lbfgs_lr,
+            max_iter=cfg.lbfgs_max_iter,
+            history_size=cfg.lbfgs_history_size,
+            line_search_fn=cfg.lbfgs_line_search_fn,
+        )
+
+        def closure():
+            lbfgs.zero_grad()
+            lbfgs_losses = compute_losses(model, cfg, x_lbfgs, phys)
+            lbfgs_losses["total"].backward()
+            return lbfgs_losses["total"]
+
+        lbfgs.step(closure)
+
+        lbfgs_eval = compute_losses(model, cfg, x_lbfgs, phys)
+
+        for key in ("total", "pde", "bc", "energy", "extract"):
+            loss_hist[key].append(lbfgs_eval[key].item())
+        #loss_hist["lr"].append(float(cfg.lbfgs_lr))
+
+        print(
+            "LBFGS done: "
+            f"total={lbfgs_eval['total'].item():.3e}, "
+            f"pde={lbfgs_eval['pde'].item():.3e}, "
+            f"bc={lbfgs_eval['bc'].item():.3e}, "
+            f"en={lbfgs_eval['energy'].item():.3e}, "
+            f"ext={lbfgs_eval['extract'].item():.3e}"
+        )
 
     train_time = time.time() - start_time
     print(f"Training time: {train_time:.2f} seconds")
