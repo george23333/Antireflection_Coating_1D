@@ -191,7 +191,7 @@ class FourierFeatureEncoding(nn.Module):
         return torch.cat([torch.sin(proj), torch.cos(proj)], dim=1)
 
 class FCNComplex(nn.Module):
-    def __init__(self, layers: tuple[int, ...], m: int = 48, sigma: float = 6.0):
+    def __init__(self, layers: tuple[int, ...], m: int = 48, sigma: float = 5.0):
         super().__init__()
         self.encoding = FourierFeatureEncoding(in_dim=1, m=m, sigma=sigma)
         self.activation = nn.Tanh()
