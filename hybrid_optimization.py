@@ -55,27 +55,27 @@ class PINNConfig:
     w_energy: float = 2.0
 
     # Dynamic loss weighting
-    dynamic_loss_weights: bool = False
+    dynamic_loss_weights: bool = True
     dynamic_weight_ema: float = 0.95
     dynamic_weight_min_ratio: float = 0.2
     dynamic_weight_max_ratio: float = 5.0
 
     # Dynamic collocation sampling
-    dynamic_collocation: bool = False
+    dynamic_collocation: bool = True
     collocation_resample_every: int = 10
     collocation_hard_ratio: float = 0.3
     collocation_hard_start_epoch: int = 1000
     collocation_candidate_factor: int = 5
 
     # Learning-rate scheduler
-    use_lr_scheduler: bool = False
+    use_lr_scheduler: bool = True
     scheduler_type: str = "cosine"  # "cosine" | "step"
     scheduler_eta_min: float = 1e-5
     scheduler_step_size: int = 1000
     scheduler_gamma: float = 0.5
 
     # Second-order optimizer (Adam -> LBFGS)
-    use_lbfgs: bool = False
+    use_lbfgs: bool = True
     lbfgs_lr: float = 1.0
     lbfgs_max_iter: int = 300
     lbfgs_history_size: int = 100
@@ -488,16 +488,17 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     n3 = np.sqrt(cfg.eps_r3 * cfg.mu_r)
     n2, d = compute_optimal_layer(cfg.f0, cfg.eps_r1, cfg.eps_r3, cfg.mu_r)
 
-    d = d * 1.00 # pertubation
+    d = d * 1.00         # pertubation around optimal thickness
+    f = cfg.f0 * 0.99    # pertubation around design frequency
 
-    lambda1 = C0 / (cfg.f0 * n1)
-    lambda3 = C0 / (cfg.f0 * n3)
-    l_ref = C0 / cfg.f0
+    lambda1 = C0 / (f * n1)
+    lambda3 = C0 / (f * n3)
+    l_ref = C0 / f
 
     x_left = -cfg.left_wavelengths * lambda1
     x_right = d + cfg.right_wavelengths * lambda3
 
-    k0 = 2.0 * np.pi * cfg.f0 / C0
+    k0 = 2.0 * np.pi * f / C0
     k1, k2, k3 = k0 * n1, k0 * n2, k0 * n3
 
     phys = {
@@ -633,7 +634,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     R_pinn = abs(r_pinn) ** 2
     T_pinn = (n3 / n1) * abs(t_pinn) ** 2
 
-    amps_an = solve_single_layer_analytic(cfg.f0, n1, n2, n3, d)
+    amps_an = solve_single_layer_analytic(f, n1, n2, n3, d)
     r_an = complex(amps_an["r"])
     t_an = complex(amps_an["t"])
     R_an = float(amps_an["R"])
@@ -663,14 +664,14 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     )
 
     d_pert = 1.2 * d
-    R_pert = float(solve_single_layer_analytic(cfg.f0, n1, n2, n3, d_pert)["R"])
+    R_pert = float(solve_single_layer_analytic(f, n1, n2, n3, d_pert)["R"])
 
     f_probe = np.linspace(0.8 * cfg.f0, 1.2 * cfg.f0, cfg.freq_probe_points)
     R_probe = np.array([solve_single_layer_analytic(f, n1, n2, n3, d)["R"] for f in f_probe])
 
     x_np = x_grid.detach().cpu().numpy().squeeze()
     e_pred_np = e_pred.detach().cpu().numpy().squeeze()
-    e_an_np = analytic_field(x_np, cfg.f0, n1, n2, n3, d, cfg.Ei, amps_an)
+    e_an_np = analytic_field(x_np, f, n1, n2, n3, d, cfg.Ei, amps_an)
 
     print("\n=== Forward PINN Metrics ===")
     print(f"n1={n1:.6f}, n2_opt={n2:.6f}, n3={n3:.6f}")
@@ -749,7 +750,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
 
     plt.figure(figsize=(10, 7))
     plt.plot(f_probe / 1e9, R_probe, label="Analytic Reflectance (fixed d_opt)")
-    plt.scatter([cfg.f0 / 1e9], [R_pinn], color="red", s=40, label="PINN @ f0")
+    plt.scatter([f / 1e9], [R_pinn], color="red", s=40, label=f"PINN @ {f/1e9:.2f} GHz")
     plt.xlabel("Frequency [GHz]")
     plt.ylabel("Reflectance R")
     plt.title("Frequency Characteristic")
