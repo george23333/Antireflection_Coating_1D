@@ -489,7 +489,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     n2, d = compute_optimal_layer(cfg.f0, cfg.eps_r1, cfg.eps_r3, cfg.mu_r)
 
     d = d * 1.00         # pertubation around optimal thickness
-    f = cfg.f0 * 0.99    # pertubation around design frequency
+    f = cfg.f0 * 1.00    # pertubation around design frequency
 
     lambda1 = C0 / (f * n1)
     lambda3 = C0 / (f * n3)
@@ -681,33 +681,35 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     print(f"Interface continuity error = {if_l2:.3e}")
     print(f"Perturbation check: R(d_opt)={R_an:.3e}, R(1.2*d_opt)={R_pert:.3e}")
 
-    plt.figure(figsize=(10, 7))
+    plt.figure(figsize=(6, 5))
     plot_curve(
         x_np, np.abs(e_an_np),
         label="|E| Analytic",
         xlabel="x [m]",
         ylabel="|E(x)|",
-        title="Field Magnitude: PINN vs Analytic",
+        #title="Field Magnitude: PINN vs Analytic",
+        title="(b)",
         vlines=[0.0, d],
     )
     plt.plot(x_np, np.abs(e_pred_np), "--", label="|E| PINN")
     plt.legend()
     plt.show()
 
-    plt.figure(figsize=(10, 7))
+    plt.figure(figsize=(6, 5))
     plot_curve(
         x_np, np.unwrap(np.angle(e_an_np)),
         label="Phase Analytic",
         xlabel="x [m]",
         ylabel="Phase [rad]",
-        title="Field Phase: PINN vs Analytic",
+        #title="Field Phase: PINN vs Analytic",
+        title="(b)",
         vlines=[0.0, d],
     )
     plt.plot(x_np, np.unwrap(np.angle(e_pred_np)), "--", label="Phase PINN")
     plt.legend()
     plt.show()
 
-    plt.figure(figsize=(10, 7))
+    plt.figure(figsize=(6, 5))
     for key, label in [
         ("total", "Total Loss"),
         ("pde", "PDE Loss"),
@@ -716,44 +718,48 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     ]:
         plt.plot(loss_hist[key], label=label)
     plt.yscale("log")
-    plt.xlabel("Iteration")
+    plt.xlabel("Epoch")
     plt.ylabel("Loss")
-    plt.title("Training Losses")
+    #plt.title("Training Losses")
+    plt.title("(a)")
     plt.minorticks_on()
     plt.legend()
     plt.tight_layout()
     plt.show()
 
     if cfg.use_lr_scheduler:
-        plt.figure(figsize=(10, 4))
-        plt.plot(loss_hist["lr"], label="Learning Rate")
-        plt.xlabel("Iteration")
-        plt.ylabel("LR")
-        plt.title("Learning Rate Schedule")
+        plt.figure(figsize=(6, 5))
+        plt.plot(loss_hist["lr"])
+        plt.xlabel("Epoch")
+        plt.ylabel("Learning Rate")
+        #plt.title("Learning Rate Schedule")
+        plt.title("(b)")
         plt.minorticks_on()
-        plt.legend()
+        #plt.legend()
         plt.tight_layout()
         plt.show()
 
     if cfg.dynamic_loss_weights:
-        plt.figure(figsize=(10, 4))
-        plt.plot(weight_hist["pde"], label="w_pde")
-        plt.plot(weight_hist["if"], label="w_if")
-        plt.plot(weight_hist["energy"], label="w_energy")
-        plt.xlabel("Iteration")
+        plt.figure(figsize=(6, 5))
+        plt.plot(weight_hist["pde"], label=r"$w_{PDE}$")
+        plt.plot(weight_hist["if"], label=r"$w_{IF}$")
+        plt.plot(weight_hist["energy"], label=r"$w_{energy}$")
+        plt.xlabel("Epoch")
         plt.ylabel("Weight")
-        plt.title("Dynamic Loss Weights")
+        #plt.title("Dynamic Loss Weights")
+        plt.title("(c)")
         plt.minorticks_on()
         plt.legend()
         plt.tight_layout()
         plt.show()
 
-    plt.figure(figsize=(10, 7))
+    plt.figure(figsize=(6, 5))
     plt.plot(f_probe / 1e9, R_probe, label="Analytic Reflectance (fixed d_opt)")
     plt.scatter([f / 1e9], [R_pinn], color="red", s=40, label=f"PINN @ {f/1e9:.2f} GHz")
     plt.xlabel("Frequency [GHz]")
     plt.ylabel("Reflectance R")
-    plt.title("Frequency Characteristic")
+    #plt.title("Frequency Characteristic")
+    plt.title("(f)")
     plt.minorticks_on()
     plt.legend()
     plt.tight_layout()

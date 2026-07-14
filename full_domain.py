@@ -183,7 +183,7 @@ def analytic_field(
 class FourierFeatureEncoding(nn.Module):
     def __init__(self, in_dim: int = 1, m: int = 48, sigma: float = 5.0):
         super().__init__()
-        B = sigma * torch.randn(in_dim, m, dtype=torch.float64)
+        B = sigma * torch.randn(in_dim, m, dtype=torch.float64)    # B ~ N(0, sigma^2)
         self.register_buffer("B", B)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

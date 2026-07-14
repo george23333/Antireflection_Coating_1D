@@ -432,7 +432,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
 
     e1_0 = cfg.Ei * (1.0 + r_pinn)                                          # E1(0)
     de1_0 = cfg.Ei * (-1j * k1 + 1j * k1 * r_pinn)                          # dE1/dx(0)
-    e3_d = cfg.Ei * t_pinn * np.exp(-1j * k3 * d)                            # E3(d)
+    e3_d = cfg.Ei * t_pinn * np.exp(-1j * k3 * d)                           # E3(d)
     de3_d = -1j * k3 * e3_d                                                 # dE3/dx(d)
 
     if_l2 = float(
@@ -460,33 +460,35 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     print(f"Interface continuity error = {if_l2:.3e}")
     print(f"Perturbation check: R(d_opt)={R_an:.3e}, R(1.2*d_opt)={R_pert:.3e}")
 
-    plt.figure(figsize=(10, 7))
+    plt.figure(figsize=(6, 5))
     plot_curve(
         x_np, np.abs(e_an_np),
         label="|E| Analytic",
         xlabel="x [m]",
         ylabel="|E(x)|",
-        title="Field Magnitude: PINN vs Analytic",
+        #title="Field Magnitude: PINN vs Analytic",
+        title="(a)",
         vlines=[0.0, d],
     )
     plt.plot(x_np, np.abs(e_pred_np), "--", label="|E| PINN")
     plt.legend()
     plt.show()
 
-    plt.figure(figsize=(10, 7))
+    plt.figure(figsize=(6, 5))
     plot_curve(
         x_np, np.unwrap(np.angle(e_an_np)),
         label="Phase Analytic",
         xlabel="x [m]",
         ylabel="Phase [rad]",
-        title="Field Phase: PINN vs Analytic",
+        #title="Field Phase: PINN vs Analytic",
+        title="(b)",
         vlines=[0.0, d],
     )
     plt.plot(x_np, np.unwrap(np.angle(e_pred_np)), "--", label="Phase PINN")
     plt.legend()
     plt.show()
 
-    plt.figure(figsize=(10, 7))
+    plt.figure(figsize=(6, 5))
     for key, label in [
         ("total", "Total Loss"),
         ("pde", "PDE Loss"),
@@ -495,20 +497,22 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     ]:
         plt.plot(loss_hist[key], label=label)
     plt.yscale("log")
-    plt.xlabel("Iteration")
+    plt.xlabel("Epoch")
     plt.ylabel("Loss")
-    plt.title("Training Losses")
+    #plt.title("Training Losses")
+    plt.title("(c)")
     plt.minorticks_on()
     plt.legend()
     plt.tight_layout()
     plt.show()
 
-    plt.figure(figsize=(10, 7))
+    plt.figure(figsize=(6, 5))
     plt.plot(f_probe / 1e9, R_probe, label="Analytic Reflectance (fixed d_opt)")
     plt.scatter([cfg.f0 / 1e9], [R_pinn], color="red", s=40, label="PINN @ f0")
     plt.xlabel("Frequency [GHz]")
     plt.ylabel("Reflectance R")
-    plt.title("Frequency Characteristic")
+    #plt.title("Frequency Characteristic")
+    plt.title("(d)")
     plt.minorticks_on()
     plt.legend()
     plt.tight_layout()
