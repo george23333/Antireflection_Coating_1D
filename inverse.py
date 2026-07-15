@@ -47,6 +47,12 @@ class InversePINNConfig:
     init_n2_scale: float = 0.8
     init_d_scale: float = 0.8
 
+    # Unknown left interface x0. Values are scaled by the wavelength in region 1.
+    true_x0_wavelengths: float = 0.20
+    init_x0_wavelengths: float = -0.10
+    x0_min_wavelengths: float = -0.50
+    x0_max_wavelengths: float = 0.50
+
     # Network / training.
     layers: tuple[int, ...] = (1, 50, 50, 50, 50, 2)
     epochs: int = 5000
@@ -77,7 +83,7 @@ class InversePINNConfig:
     make_plots: bool = True
 
     # Saved model and recovered inverse parameters.
-    checkpoint_path: str = "checkpoints/inverse_model.pt"
+    checkpoint_path: str = "checkpoints/inverse_two_unknown_boundaries.pt"
     force_retrain: bool = False
 
 
@@ -136,7 +142,13 @@ class CoatingFieldNet(nn.Module):
 
 
 class InverseCoatingParams(nn.Module):
-    def __init__(self, cfg: InversePINNConfig, d_design: float, n2_design: float):
+    def __init__(
+        self,
+        cfg: InversePINNConfig,
+        d_design: float,
+        n2_design: float,
+        lambda1: float,
+    ):
         super().__init__()
         d_min = cfg.d_min_scale * d_design
         d_max = cfg.d_max_scale * d_design
@@ -144,11 +156,17 @@ class InverseCoatingParams(nn.Module):
         init_n2 = np.clip(cfg.init_n2_scale * n2_design, cfg.n2_min, cfg.n2_max)     # ensure initial guess is within bounds
         init_d = np.clip(cfg.init_d_scale * d_design, d_min, d_max)
 
+        x0_min = cfg.x0_min_wavelengths * lambda1
+        x0_max = cfg.x0_max_wavelengths * lambda1
+        init_x0 = np.clip(cfg.init_x0_wavelengths * lambda1, x0_min, x0_max)
+
         raw_n2 = inverse_sigmoid((init_n2 - cfg.n2_min) / (cfg.n2_max - cfg.n2_min)) # normalize initial guess to [0, 1] and then apply inverse sigmoid
         raw_d = inverse_sigmoid((init_d - d_min) / (d_max - d_min))
+        raw_x0 = inverse_sigmoid((init_x0 - x0_min) / (x0_max - x0_min))
 
         self.raw_n2 = nn.Parameter(torch.tensor(raw_n2, dtype=torch.float64))
         self.raw_d = nn.Parameter(torch.tensor(raw_d, dtype=torch.float64))
+        self.raw_x0 = nn.Parameter(torch.tensor(raw_x0, dtype=torch.float64))
         self.r_re = nn.Parameter(torch.tensor(0.0, dtype=torch.float64))
         self.r_im = nn.Parameter(torch.tensor(0.0, dtype=torch.float64))
         self.t_re = nn.Parameter(torch.tensor(0.0, dtype=torch.float64))
@@ -158,6 +176,8 @@ class InverseCoatingParams(nn.Module):
         self.n2_max = float(cfg.n2_max)
         self.d_min = float(d_min)
         self.d_max = float(d_max)
+        self.x0_min = float(x0_min)
+        self.x0_max = float(x0_max)
 
     @property
     def n2(self) -> torch.Tensor:
@@ -166,6 +186,10 @@ class InverseCoatingParams(nn.Module):
     @property
     def d(self) -> torch.Tensor:
         return bounded_parameter(self.raw_d, self.d_min, self.d_max)
+
+    @property
+    def x0(self) -> torch.Tensor:
+        return bounded_parameter(self.raw_x0, self.x0_min, self.x0_max)
 
     @property
     def r(self) -> torch.Tensor:
@@ -207,29 +231,27 @@ def predict_field(
     x: torch.Tensor,
     phys: dict[str, float],
     cfg: InversePINNConfig,
-    region: torch.Tensor | None = None,
 ) -> torch.Tensor:
     j = torch.tensor(1j, dtype=torch.complex128, device=device)
     ei = torch.tensor(cfg.Ei, dtype=torch.complex128, device=device)
-    x_flat = x[:, 0]
+    # Local coordinate measured from the current estimated left interface.
+    xi = x - params.x0
 
-    if region is None:
-        left = x_flat < 0.0
-        right = x_flat > params.d.detach()
-        coating = ~(left | right)
-    else:
-        left = region == -1
-        coating = region == 0
-        right = region == 1
+    # Hard region assignment. detach() is intentional because Boolean masks
+    # are not differentiable with respect to x0 or d.
+    xi_mask = x[:, 0] - params.x0.detach()
+    left = xi_mask < 0.0
+    right = xi_mask > params.d.detach()
+    coating = ~(left | right)
 
     out = torch.zeros((x.shape[0], 1), dtype=torch.complex128, device=device)
     if left.any():
-        xl = x[left]
+        xl = xi[left]
         out[left] = ei * (torch.exp(-j * phys["k1"] * xl) + params.r * torch.exp(j * phys["k1"] * xl))
     if coating.any():
-        out[coating] = model.complex_field(x[coating] / params.d)
+        out[coating] = model.complex_field(xi[coating] / params.d)
     if right.any():
-        xr = x[right]
+        xr = xi[right]
         out[right] = ei * params.t * torch.exp(-j * phys["k3"] * xr)
     return out
 
@@ -245,7 +267,8 @@ def make_synthetic_observations(
     x_left = np.linspace(-0.85 * lambda1, -0.15 * lambda1, cfg.n_data_left)
     x_coat = np.linspace(0.08 * d, 0.92 * d, cfg.n_data_coating)
     x_right = np.linspace(d + 0.15 * lambda3, d + 0.85 * lambda3, cfg.n_data_right)
-    x_data_np = np.concatenate([x_left, x_coat, x_right])[:, None]
+    x_local_np = np.concatenate([x_left, x_coat, x_right])[:, None]
+    x_data_np = x_local_np + phys_true["x0"]
     region_np = np.concatenate(
         [
             -np.ones(cfg.n_data_left, dtype=np.int64),
@@ -258,7 +281,7 @@ def make_synthetic_observations(
         cfg.f0, phys_true["n1"], phys_true["n2"], phys_true["n3"], phys_true["d"], cfg.Ei
     )
     e_data_np = analytic_field(
-        x_data_np[:, 0],
+        x_local_np[:, 0],
         cfg.f0,
         phys_true["n1"],
         phys_true["n2"],
@@ -318,7 +341,8 @@ def compute_losses(
         + complex_mse((de1_dx - de_right_d) / phys["k0"])
     )
 
-    e_pred = predict_field(model, params, x_data, phys, cfg, region_data)
+    # Ignore the synthetic labels and classify using the current hard boundaries.
+    e_pred = predict_field(model, params, x_data, phys, cfg)
     l_data = complex_mse(e_pred - e_data)
 
     energy = complex_abs2(params.r) + (phys["n3"] / phys["n1"]) * complex_abs2(params.t) - 1.0
@@ -345,6 +369,8 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
     n2_design, d_design = compute_optimal_layer(cfg.f0, cfg.eps_r1, cfg.eps_r3, cfg.mu_r)
     n2_true = float(cfg.true_n2_scale * n2_design)
     d_true = float(cfg.true_d_scale * d_design)
+    lambda1 = C0 / (cfg.f0 * n1)
+    x0_true = float(cfg.true_x0_wavelengths * lambda1)
 
     k0 = 2.0 * np.pi * cfg.f0 / C0
     phys = {
@@ -354,11 +380,11 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
         "k1": float(k0 * n1),
         "k3": float(k0 * n3),
     }
-    phys_true = dict(phys, n2=n2_true, d=d_true)
+    phys_true = dict(phys, n2=n2_true, d=d_true, x0=x0_true)
 
     x_data, e_data, region_data = make_synthetic_observations(cfg, phys_true)
     model = CoatingFieldNet(cfg.layers).to(device)
-    params = InverseCoatingParams(cfg, d_design, n2_design).to(device)
+    params = InverseCoatingParams(cfg, d_design, n2_design, lambda1).to(device)
     optimizer = torch.optim.Adam(list(model.parameters()) + list(params.parameters()), lr=cfg.lr)
     scheduler = build_lr_scheduler(optimizer, cfg)
 
@@ -370,6 +396,7 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
         "energy": [],
         "n2": [],
         "d": [],
+        "x0": [],
     }
 
     checkpoint_path = Path(__file__).resolve().parent / cfg.checkpoint_path
@@ -401,6 +428,7 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
             loss_history[key].append(float(losses[key].detach().cpu()))
         loss_history["n2"].append(float(params.n2.detach().cpu()))
         loss_history["d"].append(float(params.d.detach().cpu()))
+        loss_history["x0"].append(float(params.x0.detach().cpu()))
 
         if epoch == 1 or epoch % cfg.print_every == 0:
             print(
@@ -408,6 +436,7 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
                 f"pde={losses['pde'].item():.3e} if={losses['interface'].item():.3e} "
                 f"data={losses['data'].item():.3e} | "
                 f"n2={params.n2.item():.6f} d={params.d.item():.6e} "
+                f"x0={params.x0.item():.6e} "
                 f"lr={optimizer.param_groups[0]['lr']:.2e}"
             )
 
@@ -438,6 +467,7 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
             loss_history[key].append(float(lbfgs_losses[key].detach().cpu()))
         loss_history["n2"].append(float(params.n2.detach().cpu()))
         loss_history["d"].append(float(params.d.detach().cpu()))
+        loss_history["x0"].append(float(params.x0.detach().cpu()))
         print(
             "LBFGS done: "
             f"total={lbfgs_losses['total'].item():.3e}, "
@@ -462,28 +492,31 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
 
     n2_est = float(params.n2.detach().cpu())
     d_est = float(params.d.detach().cpu())
+    x0_est = float(params.x0.detach().cpu())
     r_est = complex(params.r.detach().cpu().numpy().item())
     t_est = complex(params.t.detach().cpu().numpy().item())
 
     print("\n=== Inverse result ===")
     print(f"true n2 = {n2_true:.8f}, estimated n2 = {n2_est:.8f}")
     print(f"true d  = {d_true:.8e} m, estimated d  = {d_est:.8e} m")
+    print(f"true x0 = {x0_true:.8e} m, estimated x0 = {x0_est:.8e} m")
+    print(f"true x1 = {x0_true + d_true:.8e} m, estimated x1 = {x0_est + d_est:.8e} m")
     print(f"r = {r_est:.6e}, R = {abs(r_est) ** 2:.6e}")
     print(f"t = {t_est:.6e}, T = {(n3 / n1) * abs(t_est) ** 2:.6e}")
     if not load_checkpoint:
         print(f"Training time: {train_time:.2f} seconds")
 
     if cfg.make_plots:
-        lambda1 = C0 / (cfg.f0 * n1)
         lambda3 = C0 / (cfg.f0 * n3)
-        x_min = -1.0 * lambda1
-        x_max = d_true + 1.0 * lambda3
+        x_min = x0_true - 1.0 * lambda1
+        x_max = x0_true + d_true + 1.0 * lambda3
         x_plot = torch.linspace(x_min, x_max, cfg.n_plot, device=device).unsqueeze(1)
         e_pred = predict_field(model, params, x_plot, phys, cfg).detach().cpu().numpy()[:, 0]
 
         amps_true = solve_single_layer_analytic(cfg.f0, n1, n2_true, n3, d_true, cfg.Ei)
         e_true = analytic_field(
-            x_plot.detach().cpu().numpy()[:, 0], cfg.f0, n1, n2_true, n3, d_true, cfg.Ei, amps_true
+            x_plot.detach().cpu().numpy()[:, 0] - x0_true,
+            cfg.f0, n1, n2_true, n3, d_true, cfg.Ei, amps_true
         )
 
         plt.figure(figsize=(10, 5))
@@ -495,9 +528,10 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
             s=18,
             label="data",
         )
-        plt.axvline(0.0, color="k", linestyle=":", linewidth=1)
-        plt.axvline(d_true, color="k", linestyle=":", linewidth=1, label="true d")
-        plt.axvline(d_est, color="r", linestyle=":", linewidth=1, label="estimated d")
+        plt.axvline(x0_true, color="k", linestyle=":", linewidth=1, label="true interfaces")
+        plt.axvline(x0_true + d_true, color="k", linestyle=":", linewidth=1)
+        plt.axvline(x0_est, color="r", linestyle=":", linewidth=1, label="estimated interfaces")
+        plt.axvline(x0_est + d_est, color="r", linestyle=":", linewidth=1)
         plt.xlabel("x [m]")
         plt.ylabel("|E(x)|")
         plt.title("Inverse PINN Field Reconstruction")
@@ -536,6 +570,16 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
+
+        plt.figure(figsize=(10, 5))
+        plt.plot(np.array(loss_history["x0"]) * 1e6, label="estimated x0")
+        plt.axhline(x0_true * 1e6, color="k", linestyle=":", label="true x0")
+        plt.xlabel("Epoch")
+        plt.ylabel("x0 [um]")
+        plt.title("Recovered Left Interface")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
         plt.show()
 
     return {
@@ -543,8 +587,14 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
         "params": params,
         "config": cfg,
         "loss_history": loss_history,
-        "true": {"n2": n2_true, "d": d_true},
-        "estimated": {"n2": n2_est, "d": d_est, "r": r_est, "t": t_est},
+        "true": {"n2": n2_true, "d": d_true, "x0": x0_true},
+        "estimated": {
+            "n2": n2_est,
+            "d": d_est,
+            "x0": x0_est,
+            "r": r_est,
+            "t": t_est,
+        },
         "x_data": x_data.detach().cpu().numpy(),
         "e_data": e_data.detach().cpu().numpy(),
         "region_data": region_data.detach().cpu().numpy(),
