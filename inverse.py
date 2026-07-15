@@ -1,5 +1,6 @@
 import time
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -75,6 +76,10 @@ class InversePINNConfig:
     n_plot: int = 1200
     make_plots: bool = True
 
+    # Saved model and recovered inverse parameters.
+    checkpoint_path: str = "checkpoints/inverse_model.pt"
+    force_retrain: bool = False
+
 
 def complex_abs2(z: torch.Tensor) -> torch.Tensor:
     return z.real.square() + z.imag.square()
@@ -136,10 +141,10 @@ class InverseCoatingParams(nn.Module):
         d_min = cfg.d_min_scale * d_design
         d_max = cfg.d_max_scale * d_design
 
-        init_n2 = np.clip(cfg.init_n2_scale * n2_design, cfg.n2_min, cfg.n2_max)
+        init_n2 = np.clip(cfg.init_n2_scale * n2_design, cfg.n2_min, cfg.n2_max)     # ensure initial guess is within bounds
         init_d = np.clip(cfg.init_d_scale * d_design, d_min, d_max)
 
-        raw_n2 = inverse_sigmoid((init_n2 - cfg.n2_min) / (cfg.n2_max - cfg.n2_min))
+        raw_n2 = inverse_sigmoid((init_n2 - cfg.n2_min) / (cfg.n2_max - cfg.n2_min)) # normalize initial guess to [0, 1] and then apply inverse sigmoid
         raw_d = inverse_sigmoid((init_d - d_min) / (d_max - d_min))
 
         self.raw_n2 = nn.Parameter(torch.tensor(raw_n2, dtype=torch.float64))
@@ -367,8 +372,22 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
         "d": [],
     }
 
+    checkpoint_path = Path(__file__).resolve().parent / cfg.checkpoint_path
+    load_checkpoint = checkpoint_path.exists() and not cfg.force_retrain
+    if load_checkpoint:
+        try:
+            checkpoint = torch.load(
+                checkpoint_path, map_location=device, weights_only=True
+            )
+        except TypeError:  # Compatibility with older PyTorch versions.
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        params.load_state_dict(checkpoint["params_state_dict"])
+        loss_history = checkpoint.get("loss_history", loss_history)
+        print(f"Loaded trained inverse model: {checkpoint_path}")
+
     start = time.time()
-    for epoch in range(1, cfg.epochs + 1):
+    for epoch in range(1, 0 if load_checkpoint else cfg.epochs + 1):
         s_collocation = sample_uniform(cfg.n_collocation, 0.0, 1.0)
         losses = compute_losses(model, params, cfg, s_collocation, x_data, e_data, region_data, phys)
 
@@ -392,7 +411,7 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
                 f"lr={optimizer.param_groups[0]['lr']:.2e}"
             )
 
-    if cfg.use_lbfgs:
+    if cfg.use_lbfgs and not load_checkpoint:
         print("\nStarting LBFGS refinement...")
         s_lbfgs = sample_uniform(cfg.n_collocation, 0.0, 1.0)
         lbfgs = torch.optim.LBFGS(
@@ -429,6 +448,17 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
         )
 
     train_time = time.time() - start
+    if not load_checkpoint:
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "params_state_dict": params.state_dict(),
+                "loss_history": loss_history,
+            },
+            checkpoint_path,
+        )
+        print(f"Saved trained inverse model: {checkpoint_path}")
 
     n2_est = float(params.n2.detach().cpu())
     d_est = float(params.d.detach().cpu())
@@ -440,7 +470,8 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
     print(f"true d  = {d_true:.8e} m, estimated d  = {d_est:.8e} m")
     print(f"r = {r_est:.6e}, R = {abs(r_est) ** 2:.6e}")
     print(f"t = {t_est:.6e}, T = {(n3 / n1) * abs(t_est) ** 2:.6e}")
-    print(f"Training time: {train_time:.2f} seconds")
+    if not load_checkpoint:
+        print(f"Training time: {train_time:.2f} seconds")
 
     if cfg.make_plots:
         lambda1 = C0 / (cfg.f0 * n1)
@@ -528,4 +559,5 @@ def main(config: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    main()
+    #main()
+    main({"force_retrain": True})

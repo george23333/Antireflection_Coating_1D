@@ -1,5 +1,6 @@
 import time
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -65,6 +66,10 @@ class PINNConfig:
     print_every: int = 200
     n_plot: int = 1500
     freq_probe_points: int = 101
+
+    # Saved model
+    checkpoint_path: str = "checkpoints/full_domain_model.pt"
+    force_retrain: bool = False
 
 
 # ---------------------------------------------------------------------
@@ -426,12 +431,25 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
 
     loss_hist = {"total": [], "pde": [], "bc": [], "energy": [], "extract": []}
 
+    checkpoint_path = Path(__file__).resolve().parent / cfg.checkpoint_path
+    load_checkpoint = checkpoint_path.exists() and not cfg.force_retrain
+    if load_checkpoint:
+        try:
+            checkpoint = torch.load(
+                checkpoint_path, map_location=device, weights_only=True
+            )
+        except TypeError:  # Compatibility with older PyTorch versions
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        loss_hist = checkpoint.get("loss_history", loss_hist)
+        print(f"Loaded trained model: {checkpoint_path}")
+
     start_time = time.time()
     model.train()
 
     x_collocation = sample_interval_lhs(cfg.n_collocation, x_left, x_right)
 
-    for ep in range(1, cfg.epochs + 1):
+    for ep in range(1, 0 if load_checkpoint else cfg.epochs + 1):
         if ep > 1 and ep % cfg.resample_every == 0:
             x_collocation = sample_interval_lhs(cfg.n_collocation, x_left, x_right)
 
@@ -454,7 +472,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
                 f"ext={losses['extract'].item():.3e}"
             )
     
-    if cfg.use_lbfgs:
+    if cfg.use_lbfgs and not load_checkpoint:
         print("\nStarting LBFGS refinement...")
 
         # Important: use a fixed collocation set during LBFGS
@@ -490,8 +508,18 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
             f"ext={lbfgs_eval['extract'].item():.3e}"
         )
 
-    train_time = time.time() - start_time
-    print(f"Training time: {train_time:.2f} seconds")
+    if not load_checkpoint:
+        train_time = time.time() - start_time
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "loss_history": loss_hist,
+            },
+            checkpoint_path,
+        )
+        print(f"Training time: {train_time:.2f} seconds")
+        print(f"Saved trained model: {checkpoint_path}")
 
     model.eval()
     x_grid = torch.linspace(x_left, x_right, cfg.n_plot, device=device).unsqueeze(1)
@@ -545,7 +573,8 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
         label="|E| Analytic",
         xlabel="x [m]",
         ylabel="|E(x)|",
-        title="Field Magnitude: PINN vs Analytic",
+        #title="Field Magnitude: PINN vs Analytic",
+        title="(a)",
         vlines=[0.0, d],
     )
     plt.plot(x_np, np.abs(e_pred_np), "--", label="|E| PINN")
@@ -559,7 +588,8 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
         label="Phase Analytic",
         xlabel="x [m]",
         ylabel="Phase [rad]",
-        title="Field Phase: PINN vs Analytic",
+        #title="Field Phase: PINN vs Analytic",
+        title="(b)",
         vlines=[0.0, d],
     )
     plt.plot(x_np, np.unwrap(np.angle(e_pred_np)), "--", label="Phase PINN")
@@ -620,3 +650,4 @@ def main(config: dict[str, Any] | None = None) -> dict[str, Any]:
 
 if __name__ == "__main__":
     main()
+    #main({"force_retrain": True})
