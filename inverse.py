@@ -55,7 +55,7 @@ class InversePINNConfig:
 
     # Network / training.
     layers: tuple[int, ...] = (1, 50, 50, 50, 50, 2)
-    epochs: int = 5000
+    epochs: int = 8000
     lr: float = 2e-3
     n_collocation: int = 300
     n_data_left: int = 10
@@ -534,7 +534,8 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
         plt.axvline(x0_est + d_est, color="r", linestyle=":", linewidth=1)
         plt.xlabel("x [m]")
         plt.ylabel("|E(x)|")
-        plt.title("Inverse PINN Field Reconstruction")
+        #plt.title("Inverse PINN Field Reconstruction")
+        plt.title("(a)")
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
@@ -547,6 +548,7 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
         plt.xlabel("Epoch")
         plt.ylabel("Loss")
         plt.title("Inverse PINN Loss History")
+        plt.title("(b)")
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
@@ -556,7 +558,8 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
         plt.axhline(n2_true, color="k", linestyle=":", label="true n2")
         plt.xlabel("Epoch")
         plt.ylabel("n2")
-        plt.title("Recovered Refractive Index")
+        #plt.title("Recovered Refractive Index")
+        plt.title("(c)")
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
@@ -566,7 +569,8 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
         plt.axhline(d_true * 1e6, color="k", linestyle=":", label="true d")
         plt.xlabel("Epoch")
         plt.ylabel("d [um]")
-        plt.title("Recovered Thickness")
+        #plt.title("Recovered Thickness")
+        plt.title("(d)")
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
@@ -576,7 +580,8 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
         plt.axhline(x0_true * 1e6, color="k", linestyle=":", label="true x0")
         plt.xlabel("Epoch")
         plt.ylabel("x0 [um]")
-        plt.title("Recovered Left Interface")
+        #plt.title("Recovered Left Interface")
+        plt.title("(e)")
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
@@ -609,5 +614,5 @@ def main(config: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    #main()
-    main({"force_retrain": True})
+    main()
+    #main({"force_retrain": True})
