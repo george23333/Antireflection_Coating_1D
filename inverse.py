@@ -519,7 +519,7 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
             cfg.f0, n1, n2_true, n3, d_true, cfg.Ei, amps_true
         )
 
-        plt.figure(figsize=(10, 5))
+        plt.figure(figsize=(6, 5))
         plt.plot(x_plot.cpu().numpy()[:, 0], np.abs(e_true), label="true |E|")
         plt.plot(x_plot.cpu().numpy()[:, 0], np.abs(e_pred), "--", label="PINN |E|")
         plt.scatter(
@@ -540,7 +540,7 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
         plt.legend()
         plt.tight_layout()
 
-        plt.figure(figsize=(10, 5))
+        plt.figure(figsize=(6, 5))
         plt.semilogy(loss_history["total"], label="total")
         plt.semilogy(loss_history["pde"], label="pde")
         plt.semilogy(loss_history["interface"], label="interface")
@@ -553,7 +553,7 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
         plt.legend()
         plt.tight_layout()
 
-        plt.figure(figsize=(10, 5))
+        plt.figure(figsize=(6, 5))
         plt.plot(loss_history["n2"], label="estimated n2")
         plt.axhline(n2_true, color="k", linestyle=":", label="true n2")
         plt.xlabel("Epoch")
@@ -564,7 +564,7 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
         plt.legend()
         plt.tight_layout()
 
-        plt.figure(figsize=(10, 5))
+        plt.figure(figsize=(6, 5))
         plt.plot(np.array(loss_history["d"]) * 1e6, label="estimated d")
         plt.axhline(d_true * 1e6, color="k", linestyle=":", label="true d")
         plt.xlabel("Epoch")
@@ -575,7 +575,7 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
         plt.legend()
         plt.tight_layout()
 
-        plt.figure(figsize=(10, 5))
+        plt.figure(figsize=(6, 5))
         plt.plot(np.array(loss_history["x0"]) * 1e6, label="estimated x0")
         plt.axhline(x0_true * 1e6, color="k", linestyle=":", label="true x0")
         plt.xlabel("Epoch")
