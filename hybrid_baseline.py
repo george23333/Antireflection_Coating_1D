@@ -571,5 +571,5 @@ def main(config: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    #main()
-    main({"force_retrain": True})
+    main()
+    #main({"force_retrain": True})
