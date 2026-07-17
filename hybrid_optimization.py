@@ -1,5 +1,6 @@
 import time
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -85,6 +86,10 @@ class PINNConfig:
     print_every: int = 200
     n_plot: int = 1500
     freq_probe_points: int = 101
+
+    # Saved network and scattering coefficients
+    checkpoint_path: str = "checkpoints/hybrid_optimization_model.pt"
+    force_retrain: bool = False
 
 
 # ---------------------------------------------------------------------
@@ -525,6 +530,21 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     loss_hist = {"total": [], "pde": [], "if": [], "energy": [], "lr": []}
     weight_hist = {"pde": [], "if": [], "energy": []}
 
+    checkpoint_path = Path(__file__).resolve().parent / cfg.checkpoint_path
+    load_checkpoint = checkpoint_path.exists() and not cfg.force_retrain
+    if load_checkpoint:
+        try:
+            checkpoint = torch.load(
+                checkpoint_path, map_location=device, weights_only=True
+            )
+        except TypeError:  # Compatibility with older PyTorch versions
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        scat.load_state_dict(checkpoint["scattering_state_dict"])
+        loss_hist = checkpoint.get("loss_history", loss_hist)
+        weight_hist = checkpoint.get("weight_history", weight_hist)
+        print(f"Loaded trained hybrid model: {checkpoint_path}")
+
     weight_adapter = DynamicLossWeights(cfg) if cfg.dynamic_loss_weights else None
     current_weights = weight_adapter.weights() if weight_adapter is not None else default_loss_weights(cfg)
 
@@ -541,7 +561,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     )
 
     # Adam training
-    for ep in range(1, cfg.epochs + 1):
+    for ep in range(1, 0 if load_checkpoint else cfg.epochs + 1):
         if ep > 1 and ep % resample_every == 0:
             x_collocation = sample_collocation_points(
                 model if cfg.dynamic_collocation else None,
@@ -582,7 +602,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
                 f"w_en={current_weights['energy']:.2f}"
             )
 
-    if cfg.use_lbfgs:
+    if cfg.use_lbfgs and not load_checkpoint:
         print("\nStarting LBFGS refinement...")
         x_lbfgs = sample_collocation_points(
             model if cfg.dynamic_collocation else None,
@@ -620,8 +640,20 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
             f"en={lbfgs_eval['energy'].item():.3e}"
         )
 
-    train_time = time.time() - start_time
-    print(f"Training time: {train_time:.2f} seconds")
+    if not load_checkpoint:
+        train_time = time.time() - start_time
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "scattering_state_dict": scat.state_dict(),
+                "loss_history": loss_hist,
+                "weight_history": weight_hist,
+            },
+            checkpoint_path,
+        )
+        print(f"Training time: {train_time:.2f} seconds")
+        print(f"Saved trained hybrid model: {checkpoint_path}")
 
     # Evaluation
     model.eval()
@@ -789,3 +821,4 @@ def main(config: dict[str, Any] | None = None) -> dict[str, Any]:
 
 if __name__ == "__main__":
     main()
+    #main({"force_retrain": True})

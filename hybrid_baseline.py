@@ -1,5 +1,6 @@
 import time
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -58,6 +59,10 @@ class PINNConfig:
     print_every: int = 200
     n_plot: int = 1500
     freq_probe_points: int = 101
+
+    # Saved network and scattering coefficients
+    checkpoint_path: str = "checkpoints/hybrid_baseline_model.pt"
+    force_retrain: bool = False
 
 
 # ---------------------------------------------------------------------
@@ -368,6 +373,20 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
 
     loss_hist = {"total": [], "pde": [], "if": [], "energy": []}
 
+    checkpoint_path = Path(__file__).resolve().parent / cfg.checkpoint_path
+    load_checkpoint = checkpoint_path.exists() and not cfg.force_retrain
+    if load_checkpoint:
+        try:
+            checkpoint = torch.load(
+                checkpoint_path, map_location=device, weights_only=True
+            )
+        except TypeError:  # Compatibility with older PyTorch versions
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        scat.load_state_dict(checkpoint["scattering_state_dict"])
+        loss_hist = checkpoint.get("loss_history", loss_hist)
+        print(f"Loaded trained baseline model: {checkpoint_path}")
+
     start_time = time.time()
     model.train()
     scat.train()
@@ -376,7 +395,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     x_collocation = torch.tensor(x_collocation, dtype=torch.float32, device=device)
 
     # Training
-    for ep in range(1, cfg.epochs + 1):
+    for ep in range(1, 0 if load_checkpoint else cfg.epochs + 1):
         if ep % 10 ==0:
             x_collocation = lhs(1, cfg.n_collocation_coating) * d
             x_collocation = torch.tensor(x_collocation, dtype=torch.float32, device=device)
@@ -399,8 +418,19 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
                 f"en={losses['energy'].item():.3e}"
             )
 
-    train_time = time.time() - start_time
-    print(f"Training time: {train_time:.2f} seconds")
+    if not load_checkpoint:
+        train_time = time.time() - start_time
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "scattering_state_dict": scat.state_dict(),
+                "loss_history": loss_hist,
+            },
+            checkpoint_path,
+        )
+        print(f"Training time: {train_time:.2f} seconds")
+        print(f"Saved trained baseline model: {checkpoint_path}")
 
     # Evaluation
     model.eval()
@@ -541,4 +571,5 @@ def main(config: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    main()
+    #main()
+    main({"force_retrain": True})
