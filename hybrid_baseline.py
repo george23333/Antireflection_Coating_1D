@@ -464,7 +464,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     plt.show()
 
     plt.figure(figsize=(6, 5))
-    plt.plot(f_probe / 1e9, R_probe, label="Analytic Reflectance (fixed d_opt)")
+    plt.plot(f_probe / 1e9, R_probe, label="Analytic Reflectance")
     plt.scatter([cfg.f0 / 1e9], [R_pinn], color="red", s=40, label="PINN @ f0")
     plt.xlabel("Frequency [GHz]")
     plt.ylabel("Reflectance R")
