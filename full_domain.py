@@ -9,6 +9,7 @@ import torch
 import torch.autograd as autograd
 import torch.nn as nn
 from pydoe import lhs
+from physics import relative_l2_error
 
 # ---------------------------------------------------------------------
 # Setup
@@ -556,12 +557,14 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     x_np = x_grid.detach().cpu().numpy().squeeze()
     e_pred_np = e_pred.detach().cpu().numpy().squeeze()
     e_an_np = analytic_field(x_np, f, n1, n2, n3, d, cfg.Ei, amps_an)
+    field_rel_l2 = relative_l2_error(e_pred_np, e_an_np)
 
     print("\n=== Forward PINN Metrics ===")
     print(f"n1={n1:.6f}, n2_opt={n2:.6f}, n3={n3:.6f}")
     print(f"d_opt={d:.6e} m")
     print(f"PINN: r={r_pinn:.6f}, t={t_pinn:.6f}, R={R_pinn:.3e}, T={T_pinn:.3e}, R+T={R_pinn + T_pinn:.6e}")
     print(f"ANLT: r={r_an:.6f}, t={t_an:.6f}, R={R_an:.3e}, T={T_an:.3e}, R+T={R_an + T_an:.6e}")
+    print(f"Relative field L2 error = {field_rel_l2:.3e}")
     print(f"Boundary condition error = {bc_l2:.3e}")
     print(f"Extraction consistency error = {extract_l2:.3e}")
     print(f"Perturbation check: R(d_opt)={R_an:.3e}, R(1.2*d_opt)={R_pert:.3e}")
@@ -635,6 +638,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
         "R_pinn": float(R_pinn),
         "T_pinn": float(T_pinn),
         "energy_sum_pinn": float(R_pinn + T_pinn),
+        "field_relative_l2_error": field_rel_l2,
         "boundary_l2_error": float(bc_l2),
         "extract_l2_error": float(extract_l2),
         "loss_history": loss_hist,

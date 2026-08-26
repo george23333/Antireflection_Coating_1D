@@ -86,3 +86,16 @@ def analytic_field(
     E[m3] = Et * np.exp(-1j * k3 * x[m3])
 
     return E
+
+
+
+def relative_l2_error(prediction: np.ndarray, reference: np.ndarray) -> float:
+    """Return ||prediction - reference||_2 / ||reference||_2."""
+    prediction = np.asarray(prediction)
+    reference = np.asarray(reference)
+
+    reference_norm = np.linalg.norm(reference)
+    if reference_norm == 0.0:
+        raise ValueError("relative L2 error is undefined for a zero reference field")
+
+    return float(np.linalg.norm(prediction - reference) / reference_norm)
