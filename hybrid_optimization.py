@@ -50,6 +50,7 @@ class PINNConfig:
     epochs: int = 5000
     lr: float = 1e-3
     n_collocation_coating: int = 500
+    seed: int = 1234
 
     # Loss weights
     w_pde: float = 1.0
@@ -490,6 +491,11 @@ def evaluate_piecewise_field(
 # ---------------------------------------------------------------------
 
 def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
+    torch.manual_seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(cfg.seed)
+
     n1 = np.sqrt(cfg.eps_r1 * cfg.mu_r)
     n3 = np.sqrt(cfg.eps_r3 * cfg.mu_r)
     n2, d = compute_optimal_layer(cfg.f0, cfg.eps_r1, cfg.eps_r3, cfg.mu_r)
@@ -550,6 +556,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     current_weights = weight_adapter.weights() if weight_adapter is not None else default_loss_weights(cfg)
 
     start_time = time.time()
+    train_time = 0.0
     model.train()
     scat.train()
 
@@ -812,6 +819,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
         "energy_sum_pinn": float(R_pinn + T_pinn),
         "field_relative_l2_error": field_rel_l2,
         "interface_l2_error": float(if_l2),
+        "training_time_s": float(train_time),
         "loss_history": loss_hist,
     }
 
