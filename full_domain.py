@@ -35,6 +35,7 @@ C0 = 299_792_458.0
 class PINNConfig:
     # Physics
     f0: float = 150e9
+    operating_frequency: float | None = None
     eps_r1: float = 1.0
     eps_r3: float = 11.7
     mu_r: float = 1.0
@@ -50,6 +51,7 @@ class PINNConfig:
     lr: float = 2e-3
     n_collocation: int = 1200
     resample_every: int = 10
+    seed: int = 1234
 
     # Fixed loss weights
     w_pde: float = 1.5
@@ -67,6 +69,7 @@ class PINNConfig:
     print_every: int = 200
     n_plot: int = 1500
     freq_probe_points: int = 101
+    show_plots: bool = True
 
     # Saved model
     checkpoint_path: str = "checkpoints/full_domain_model.pt"
@@ -397,12 +400,20 @@ def extract_scattering_coeffs(
 # ---------------------------------------------------------------------
 
 def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
+    # Restore this solver's intended precision when multiple solver modules are
+    # imported by the same experiment runner.
+    torch.set_default_dtype(torch.float64)
+    torch.manual_seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(cfg.seed)
+
     n1 = np.sqrt(cfg.eps_r1 * cfg.mu_r)
     n3 = np.sqrt(cfg.eps_r3 * cfg.mu_r)
     n2, d = compute_optimal_layer(cfg.f0, cfg.eps_r1, cfg.eps_r3, cfg.mu_r)
 
     d = d * 1.00         # pertubation around optimal thickness
-    f = cfg.f0 * 1.00    # pertubation around design frequency
+    f = cfg.f0 if cfg.operating_frequency is None else cfg.operating_frequency
 
     lambda1 = C0 / (f * n1)
     lambda3 = C0 / (f * n3)
@@ -431,6 +442,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
 
     loss_hist = {"total": [], "pde": [], "bc": [], "energy": [], "extract": []}
+    train_time = 0.0
 
     checkpoint_path = Path(__file__).resolve().parent / cfg.checkpoint_path
     load_checkpoint = checkpoint_path.exists() and not cfg.force_retrain
@@ -443,6 +455,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
             checkpoint = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(checkpoint["model_state_dict"])
         loss_hist = checkpoint.get("loss_history", loss_hist)
+        train_time = float(checkpoint.get("training_time_s", 0.0))
         print(f"Loaded trained model: {checkpoint_path}")
 
     start_time = time.time()
@@ -516,6 +529,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
             {
                 "model_state_dict": model.state_dict(),
                 "loss_history": loss_hist,
+                "training_time_s": train_time,
             },
             checkpoint_path,
         )
@@ -582,7 +596,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     )
     plt.plot(x_np, np.abs(e_pred_np), "--", label="|E| PINN")
     plt.legend()
-    plt.show()
+    plt.show() if cfg.show_plots else plt.close()
 
     plt.figure(figsize=(10, 7))
     plot_curve(
@@ -597,7 +611,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     )
     plt.plot(x_np, np.unwrap(np.angle(e_pred_np)), "--", label="Phase PINN")
     plt.legend()
-    plt.show()
+    plt.show() if cfg.show_plots else plt.close()
 
     plt.figure(figsize=(10, 7))
     for key, label in [
@@ -615,7 +629,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     plt.minorticks_on()
     plt.legend()
     plt.tight_layout()
-    plt.show()
+    plt.show() if cfg.show_plots else plt.close()
 
     plt.figure(figsize=(10, 7))
     plt.plot(f_probe / 1e9, R_probe, label="Analytic Reflectance (fixed d_opt)")
@@ -626,9 +640,11 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     plt.minorticks_on()
     plt.legend()
     plt.tight_layout()
-    plt.show()
+    plt.show() if cfg.show_plots else plt.close()
 
     return {
+        "design_frequency_hz": float(cfg.f0),
+        "operating_frequency_hz": float(f),
         "n1": float(n1),
         "n2_opt": float(n2),
         "n3": float(n3),
@@ -637,10 +653,18 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
         "t_pinn": t_pinn,
         "R_pinn": float(R_pinn),
         "T_pinn": float(T_pinn),
+        "r_reference": r_an,
+        "t_reference": t_an,
+        "R_reference": R_an,
+        "T_reference": T_an,
         "energy_sum_pinn": float(R_pinn + T_pinn),
         "field_relative_l2_error": field_rel_l2,
         "boundary_l2_error": float(bc_l2),
         "extract_l2_error": float(extract_l2),
+        "training_time_s": float(train_time),
+        "x_m": x_np,
+        "field_pinn": e_pred_np,
+        "field_reference": e_an_np,
         "loss_history": loss_hist,
     }
 

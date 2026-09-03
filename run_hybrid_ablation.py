@@ -108,7 +108,7 @@ def parse_args() -> argparse.Namespace:
 
 def write_trials(path: Path, rows: list[dict[str, object]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=TRIAL_FIELDS, delimiter=";")
+        writer = csv.DictWriter(stream, fieldnames=TRIAL_FIELDS, delimiter=",")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -145,7 +145,7 @@ def summarize_trials(
 def write_summary(path: Path, rows: list[dict[str, object]]) -> None:
     fieldnames = list(rows[0].keys())
     with path.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fieldnames, delimiter=";")
+        writer = csv.DictWriter(stream, fieldnames=fieldnames, delimiter=",")
         writer.writeheader()
         writer.writerows(rows)
 
