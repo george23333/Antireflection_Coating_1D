@@ -122,6 +122,7 @@ def summarize_trials(
         "field_relative_l2_error",
         "interface_l2_error",
         "reflectance",
+        "transmittance",
         "energy_error",
         "training_time_s",
     )
