@@ -583,7 +583,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     print(f"Extraction consistency error = {extract_l2:.3e}")
     print(f"Perturbation check: R(d_opt)={R_an:.3e}, R(1.2*d_opt)={R_pert:.3e}")
 
-    plt.figure(figsize=(10, 7))
+    plt.figure(figsize=(6, 5))
     plot_curve(
         x_np,
         np.abs(e_an_np),
@@ -597,8 +597,8 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     plt.plot(x_np, np.abs(e_pred_np), "--", label="|E| PINN")
     plt.legend()
     plt.show() if cfg.show_plots else plt.close()
-
-    plt.figure(figsize=(10, 7))
+    
+    plt.figure(figsize=(6, 5))
     plot_curve(
         x_np,
         np.unwrap(np.angle(e_an_np)),
@@ -613,25 +613,26 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
     plt.legend()
     plt.show() if cfg.show_plots else plt.close()
 
-    plt.figure(figsize=(10, 7))
+    plt.figure(figsize=(6, 5))
     for key, label in [
         ("total", "Total Loss"),
         ("pde", "PDE Loss"),
         ("bc", "Boundary Loss"),
         ("energy", "Energy Loss"),
-        ("extract", "Extraction Consistency"),
+        ("extract", "Extraction Loss"),
     ]:
         plt.plot(loss_hist[key], label=label)
     plt.yscale("log")
     plt.xlabel("Iteration")
     plt.ylabel("Loss")
-    plt.title("Training Losses")
+    #plt.title("Training Losses")
+    plt.title("(e)")
     plt.minorticks_on()
     plt.legend()
     plt.tight_layout()
     plt.show() if cfg.show_plots else plt.close()
 
-    plt.figure(figsize=(10, 7))
+    plt.figure(figsize=(6, 5))
     plt.plot(f_probe / 1e9, R_probe, label="Analytic Reflectance (fixed d_opt)")
     plt.scatter([f / 1e9], [R_pinn], color="red", s=40, label=f"PINN @ {f/1e9:.2f} GHz")
     plt.xlabel("Frequency [GHz]")
