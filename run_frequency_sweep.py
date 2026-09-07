@@ -311,7 +311,7 @@ def plot_field_snapshot(
 
         axes[row_index, 0].plot(x_mm, np.abs(reference), "k-", label="Analytical reference")
         axes[row_index, 0].plot(x_mm, np.abs(prediction), "--", label=MODEL_LABELS[model_name])
-        axes[row_index, 0].set_ylabel(r"$|E|$")
+        axes[row_index, 0].set_ylabel(r"$|E|$ [V/m]")
 
         axes[row_index, 1].plot(x_mm, np.unwrap(np.angle(reference)), "k-", label="Analytical reference")
         axes[row_index, 1].plot(x_mm, np.unwrap(np.angle(prediction)), "--", label=MODEL_LABELS[model_name])

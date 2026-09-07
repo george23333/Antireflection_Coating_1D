@@ -533,7 +533,7 @@ def run_inverse_pinn(cfg: InversePINNConfig) -> dict[str, Any]:
         plt.axvline(x0_est, color="r", linestyle=":", linewidth=1, label="estimated interfaces")
         plt.axvline(x0_est + d_est, color="r", linestyle=":", linewidth=1)
         plt.xlabel("x [m]")
-        plt.ylabel("|E(x)|")
+        plt.ylabel(r"$|E(x)|$ [V/m]")
         #plt.title("Inverse PINN Field Reconstruction")
         plt.title("(a)")
         plt.grid(True)

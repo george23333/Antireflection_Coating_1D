@@ -589,7 +589,7 @@ def run_forward_pinn(cfg: PINNConfig) -> dict[str, Any]:
         np.abs(e_an_np),
         label="|E| Analytic",
         xlabel="x [m]",
-        ylabel="|E(x)|",
+        ylabel=r"$|E(x)|$ [V/m]",
         #title="Field Magnitude: PINN vs Analytic",
         title="(a)",
         vlines=[0.0, d],
